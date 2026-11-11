@@ -126,6 +126,90 @@ Use START-FUNCTION to select the shell startup function."
         (should (eq first (agent-shell--shell-buffer :no-create t)))
         (should (eq first (agent-shell--current-shell)))))))
 
+(ert-deftest agent-shell-rename-viewport-observers-see-current-process-test ()
+  "Viewport rename observers find the same process with shell-maker support."
+  (skip-unless (fboundp 'shell-maker--sync-buffer-name))
+  (agent-shell-rename-tests--with-shells 1
+    (let* ((shell (car agent-shell-rename-tests--shells))
+           (viewport (agent-shell-viewport--buffer :shell-buffer shell))
+           (process (get-buffer-process shell))
+           (old-name (buffer-name shell))
+           (observed 'not-called)
+           (observer (lambda ()
+                       (setq observed (with-current-buffer shell
+                                        (shell-maker--process))))))
+      (unwind-protect
+          (progn
+            (with-current-buffer viewport
+              (add-hook 'buffer-list-update-hook observer nil t))
+            (with-current-buffer shell (rename-buffer " *observer-renamed*" t))
+            (should (eq process observed))
+            (should-not (get-buffer old-name)))
+        (when (buffer-live-p viewport)
+          (with-current-buffer viewport
+            (remove-hook 'buffer-list-update-hook observer t)))
+        (when-let* ((ghost (get-buffer old-name)))
+          (kill-buffer ghost))))))
+
+(ert-deftest agent-shell-rename-reused-shell-keeps-viewport-test ()
+  "Reinitializing an existing shell retains its viewport and unsent draft."
+  (agent-shell-rename-tests--with-shells 1
+    (let* ((shell (car agent-shell-rename-tests--shells))
+           (viewport (agent-shell-viewport--buffer :shell-buffer shell))
+           (process (get-buffer-process shell))
+           (config (map-elt (buffer-local-value 'agent-shell--state shell) :agent-config)))
+      (unwind-protect
+          (progn
+            (with-current-buffer viewport (insert "preserve draft"))
+            (cl-letf (((symbol-function 'agent-shell--handle) #'ignore))
+              (should (eq shell (agent-shell--start :config config
+                                                    :session-strategy 'new :no-focus t))))
+            (should (eq viewport (agent-shell-viewport--buffer :shell-buffer shell)))
+            (should (eq shell (agent-shell-viewport--shell-buffer viewport)))
+            (should (eq process (get-buffer-process shell)))
+            (should (equal "preserve draft" (with-current-buffer viewport (buffer-string)))))
+        (when (buffer-live-p viewport)
+          (kill-buffer viewport))))))
+
+(ert-deftest agent-shell-rename-reuse-failure-cleans-viewport-test ()
+  "Failed reinitialization cleans up the existing viewport with its shell."
+  (agent-shell-rename-tests--with-shells 1
+    (let* ((shell (car agent-shell-rename-tests--shells))
+           (viewport (agent-shell-viewport--buffer :shell-buffer shell))
+           (process (get-buffer-process shell))
+           (config (map-copy (map-elt (buffer-local-value 'agent-shell--state shell)
+                                      :agent-config))))
+      (unwind-protect
+          (progn
+            (map-put! config :client-maker (lambda (_buffer) nil))
+            (should-error (agent-shell--start :config config :session-strategy 'new :no-focus t))
+            (should-not (buffer-live-p shell))
+            (should-not (buffer-live-p viewport))
+            (accept-process-output process 1)
+            (should-not (process-live-p process)))
+        (when (buffer-live-p viewport)
+          (kill-buffer viewport))))))
+
+(ert-deftest agent-shell-rename-viewport-other-major-mode-test ()
+  "Changing viewport mode preserves its draft until shell cleanup."
+  (agent-shell-rename-tests--with-shells 1
+    (let* ((shell (car agent-shell-rename-tests--shells))
+           (viewport (agent-shell-viewport--buffer :shell-buffer shell)))
+      (unwind-protect
+          (progn
+            (with-current-buffer viewport
+              (insert "preserve draft")
+              (text-mode)
+              (rename-buffer " *renamed-text-draft*" t))
+            (should-not (agent-shell-viewport--buffer :shell-buffer shell :existing-only t))
+            (should-error (agent-shell-viewport--buffer :shell-buffer shell) :type 'user-error)
+            (should (equal "preserve draft" (with-current-buffer viewport (buffer-string))))
+            (kill-buffer shell)
+            (should-not (buffer-live-p viewport)))
+        (when (buffer-live-p viewport)
+          (with-current-buffer viewport
+            (agent-shell-viewport-edit-mode)))))))
+
 (ert-deftest agent-shell-rename-viewport-name-and-mode-changes-test ()
   "Viewport associations survive arbitrary names and major-mode switches."
   (agent-shell-rename-tests--with-shells 1

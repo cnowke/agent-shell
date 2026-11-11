@@ -821,10 +821,12 @@ viewport is reused even when its name no longer has a viewport suffix."
                       (agent-shell--state)))
              (viewport-buffer (map-elt state :viewport-buffer)))
         (cond
-         ((buffer-live-p viewport-buffer)
-          (unless (eq shell-buffer (agent-shell-viewport--shell-buffer viewport-buffer))
-            (user-error "Agent shell and viewport association disagree"))
+         ((and (buffer-live-p viewport-buffer)
+               (eq shell-buffer (agent-shell-viewport--shell-buffer viewport-buffer)))
           viewport-buffer)
+         ((buffer-live-p viewport-buffer)
+          (unless existing-only
+            (user-error "Agent shell and viewport association disagree")))
          ((not existing-only)
           (setq viewport-buffer (generate-new-buffer
                                  (concat (buffer-name) agent-shell-viewport--suffix)))
@@ -1684,7 +1686,6 @@ Returns nil if VIEWPORT-BUFFER is not a viewport or its shell is dead."
   "Clean up resources.
 
 For example, offer to kill associated shell session."
-  (agent-shell-viewport--ensure-buffer)
   (when (and agent-shell-viewport--clean-up
              ;; Only offer to kill shell buffers when viewport buffer
              ;; is explicitly being killed from a viewport buffer.

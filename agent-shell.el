@@ -1320,8 +1320,12 @@ the session and returns the appropriate endpoint:
   :type '(repeat (choice (alist :key-type symbol :value-type sexp) function))
   :group 'agent-shell)
 
-(cl-defun agent-shell--make-state (&key agent-config buffer client-maker needs-authentication authenticate-request-maker heartbeat outgoing-request-decorator)
+(cl-defun agent-shell--make-state (&key agent-config buffer viewport-buffer client-maker
+                                        needs-authentication authenticate-request-maker
+                                        heartbeat outgoing-request-decorator)
   "Construct shell agent state with AGENT-CONFIG and BUFFER.
+
+VIEWPORT-BUFFER preserves the existing viewport when reusing BUFFER.
 
 Shell state is provider-dependent and needs CLIENT-MAKER, NEEDS-AUTHENTICATION,
 HEARTBEAT, AUTHENTICATE-REQUEST-MAKER, and optionally
@@ -1329,7 +1333,7 @@ OUTGOING-REQUEST-DECORATOR (passed through to `acp-make-client')."
   (list (cons :agent-config agent-config)
         (cons :buffer buffer)
         (cons :last-buffer-name (when (buffer-live-p buffer) (buffer-name buffer)))
-        (cons :viewport-buffer nil)
+        (cons :viewport-buffer viewport-buffer)
         (cons :client nil)
         (cons :client-maker client-maker)
         (cons :outgoing-request-decorator outgoing-request-decorator)
@@ -4806,11 +4810,8 @@ For example, shut down ACP client."
               (when-let* ((diff-buf (map-elt tool-call-data :diff-buffer)))
                 (agent-shell-diff-kill-buffer diff-buf)))
             (map-elt (agent-shell--state) :tool-calls))
-    (when-let* (((map-elt (agent-shell--state) :buffer))
-                (viewport-buffer (agent-shell-viewport--buffer
-                                  :shell-buffer (map-elt (agent-shell--state) :buffer)
-                                  :existing-only t))
-                (buffer-live-p viewport-buffer))
+    (when-let* ((viewport-buffer (map-elt (agent-shell--state) :viewport-buffer))
+                ((buffer-live-p viewport-buffer)))
       (kill-buffer viewport-buffer))
     ;; Last, so the agent is gone before its working directory can be.
     (when (and agent-shell--pending-directory-cleanup
@@ -5365,7 +5366,9 @@ variable (see makunbound)"))
              ;; Skip shell-maker's per-start command aliasing so it does not
              ;; alias `agent-shell-submit' internally.  We alias
              ;; agent-shell.el defines its own `agent-shell-submit'.
-             :alias-commands nil))))
+             :alias-commands nil)))
+         (viewport-buffer (map-elt (buffer-local-value 'agent-shell--state shell-buffer)
+                                   :viewport-buffer)))
     ;; While sending the first prompt request would already validate
     ;; finding the ACP agent executable, users have to wait until they
     ;; type a prompt and send it, only to find out that they are missing
@@ -5376,7 +5379,9 @@ variable (see makunbound)"))
       ;; Apply dir-local variables in agent-shell buffer
       (hack-dir-local-variables-non-file-buffer)
       ;; Set minimal buffer-local state initialization so `agent-shell-get-config' is available.
-      (setq-local agent-shell--state (agent-shell--make-state :agent-config config))
+      (setq-local agent-shell--state (agent-shell--make-state :agent-config config
+                                                              :buffer shell-buffer
+                                                              :viewport-buffer viewport-buffer))
       (unless (and (map-elt config :client-maker)
                    (funcall (map-elt config :client-maker) (current-buffer)))
         (kill-buffer shell-buffer)
@@ -5390,6 +5395,7 @@ variable (see makunbound)"))
       ;; Initialize full buffer-local state (replaces the minimal one above).
       (setq-local agent-shell--state (agent-shell--make-state
                                       :buffer shell-buffer
+                                      :viewport-buffer viewport-buffer
                                       :heartbeat (agent-shell-heartbeat-make
                                                   :on-heartbeat
                                                   (agent-shell--make-heartbeat-handler shell-buffer))
@@ -5413,7 +5419,8 @@ variable (see makunbound)"))
                 #'agent-shell--prompt-queue-confirm-kill-emacs)
       (add-hook 'change-major-mode-hook #'agent-shell--clean-up nil t)
       (add-hook 'window-configuration-change-hook #'agent-shell--resize-header nil t)
-      (add-hook 'buffer-list-update-hook #'agent-shell-viewport--sync-buffer-name nil t)
+      ;; Synchronize process lookup before notifying viewport observers.
+      (add-hook 'buffer-list-update-hook #'agent-shell-viewport--sync-buffer-name t t)
       (agent-shell-ui-mode +1)
       (add-hook 'agent-shell-ui-post-expand-fragment-at-point-hook
                 #'agent-shell--render-markdown nil t)
