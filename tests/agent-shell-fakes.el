@@ -59,15 +59,15 @@ it untouched."
 
 (defun agent-shell-fakes--synth-exchange (id method params result)
   "Return a synthetic request/response pair for METHOD at ID.
-PARAMS is the request\\='s params, RESULT the response\\='s result.
+PARAMS contains the request parameters; RESULT is the response result.
 
-  (agent-shell-fakes--synth-exchange 7 "session/new" nil
-                                     \\='((sessionId . "s1")))
+  (agent-shell-fakes--synth-exchange 7 \"session/new\" nil
+                                     \\='((sessionId . \"s1\")))
   ;; => (((:direction . outgoing) (:kind . request)
-  ;;      (:object (jsonrpc . "2.0") (method . "session/new") (id . 7)))
+  ;;      (:object (jsonrpc . \"2.0\") (method . \"session/new\") (id . 7)))
   ;;     ((:direction . incoming) (:kind . response)
-  ;;      (:object (jsonrpc . "2.0") (id . 7)
-  ;;               (result (sessionId . "s1")))))"
+  ;;      (:object (jsonrpc . \"2.0\") (id . 7)
+  ;;               (result (sessionId . \"s1\")))))"
   (list `((:direction . outgoing) (:kind . request)
           (:object (jsonrpc . "2.0") (method . ,method) (id . ,id)
                    ,@(when params `((params . ,params)))))
