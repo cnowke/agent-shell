@@ -2179,7 +2179,7 @@ the same shell process and unsent viewport draft."
       (user-error "Not in a shell or viewport buffer"))
     (shell-maker-set-buffer-name
      shell-buffer (string-trim (or name (read-string "Rename shell: "
-                                                    (buffer-name shell-buffer)))))))
+                                                     (buffer-name shell-buffer)))))))
 
 (defun agent-shell-version ()
   "Show `agent-shell' mode version."
@@ -2762,6 +2762,7 @@ mouse selection or a kill where mark > point) is normalized."
   "C-c C-o" #'agent-shell-other-buffer
   "C-c C-s" #'agent-shell-set-session-config-option
   "<remap> <yank>" #'agent-shell-yank-dwim
+  "<remap> <rename-buffer>" #'agent-shell-rename-buffer
   "<remap> <comint-send-input>" #'agent-shell-submit
   ;; No equivalent in comint, bind explicitly.
   "M-RET" #'agent-shell-submit-override
@@ -5403,7 +5404,6 @@ variable (see makunbound)"))
       (setq-local filter-buffer-substring-function #'agent-shell--filter-buffer-substring)
       (setq-local beginning-of-defun-function #'agent-shell--beginning-of-block)
       (setq-local end-of-defun-function #'agent-shell--end-of-block)
-      (keymap-set agent-shell-mode-map "<remap> <rename-buffer>" #'agent-shell-rename-buffer)
       (add-hook 'xref-backend-functions #'agent-shell-markdown-xref-backend nil t)
       (agent-shell--update-header-and-mode-line)
       (add-hook 'kill-buffer-hook #'agent-shell--clean-up nil t)
@@ -9776,8 +9776,8 @@ Result is of the form ((:prompt . PROMPT) (:response . RESPONSE))."
   "Current shell for viewport or shell buffer."
   (cond ((derived-mode-p 'agent-shell-mode)
          (current-buffer))
-        ((or (derived-mode-p 'agent-shell-viewport-view-mode)
-             (derived-mode-p 'agent-shell-viewport-edit-mode))
+        ((derived-mode-p 'agent-shell-viewport-view-mode
+                         'agent-shell-viewport-edit-mode)
          (agent-shell-viewport--shell-buffer))))
 
 ;;;###autoload

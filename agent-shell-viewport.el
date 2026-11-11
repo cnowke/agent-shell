@@ -812,8 +812,8 @@ With EXISTING-ONLY, only return existing buffers without creating.
 The association survives renaming either buffer.  For example, a renamed
 viewport is reused even when its name no longer has a viewport suffix."
   (when-let* ((shell-buffer (if shell-buffer
-                               (get-buffer shell-buffer)
-                             (agent-shell--shell-buffer)))
+                                (get-buffer shell-buffer)
+                              (agent-shell--shell-buffer)))
               ((buffer-live-p shell-buffer)))
     (with-current-buffer shell-buffer
       (let* ((state (if existing-only
@@ -1685,28 +1685,18 @@ Returns nil if VIEWPORT-BUFFER is not a viewport or its shell is dead."
 
 For example, offer to kill associated shell session."
   (agent-shell-viewport--ensure-buffer)
-  (if (and agent-shell-viewport--clean-up
-           ;; Only offer to kill shell buffers when viewport buffer
-           ;; is explicitly being killed from a viewport buffer.
-           (eq (current-buffer)
-               (window-buffer (selected-window))))
-      ;; Temporarily disable cleaning up to avoid multiple clean-ups
-      ;; triggered by shell buffers attempting to kill viewport buffer.
-      (let ((agent-shell-viewport--clean-up nil))
-        (when-let* ((shell-buffers (seq-filter (lambda (shell-buffer)
-                                                 (and (equal (agent-shell-viewport--buffer
-                                                              :shell-buffer shell-buffer
-                                                              :existing-only t)
-                                                             (current-buffer))
-                                                      ;; Skip shells already shutting down (client
-                                                      ;; is nil after agent-shell--shutdown).
-                                                      (buffer-local-value 'agent-shell--state shell-buffer)
-                                                      (map-elt (buffer-local-value 'agent-shell--state shell-buffer) :client)))
-                                               (agent-shell-buffers)))
-                    ((y-or-n-p "Kill shell session too?")))
-          (mapc (lambda (shell-buffer)
-                  (kill-buffer shell-buffer))
-                shell-buffers)))))
+  (when (and agent-shell-viewport--clean-up
+             ;; Only offer to kill shell buffers when viewport buffer
+             ;; is explicitly being killed from a viewport buffer.
+             (eq (current-buffer)
+                 (window-buffer (selected-window))))
+    ;; Temporarily disable cleaning up to avoid multiple clean-ups
+    ;; triggered by shell buffers attempting to kill viewport buffer.
+    (let ((agent-shell-viewport--clean-up nil))
+      (when-let* ((shell-buffer (agent-shell-viewport--shell-buffer))
+                  ((map-elt (buffer-local-value 'agent-shell--state shell-buffer) :client))
+                  ((y-or-n-p "Kill shell session too?")))
+        (kill-buffer shell-buffer)))))
 
 (define-derived-mode agent-shell-viewport-edit-mode text-mode "Agent Shell Viewport (Edit)"
   "Major mode for composing agent shell prompts.
