@@ -96,6 +96,10 @@
 (defvar agent-shell-session-strategy)
 (defvar agent-shell--state)
 
+(defvar-local agent-shell-viewport--shell-buffer nil
+  "Shell buffer associated with this viewport.")
+(put 'agent-shell-viewport--shell-buffer 'permanent-local t)
+
 (defvar-local agent-shell-viewport--compose-snapshot nil
   "Alist with :content and :location from compose buffer before viewing history.")
 ;; The viewport buffer transitions between major modes which clears
@@ -804,20 +808,42 @@ in, as `agent-shell-viewport-next-item' does from its end."
 (cl-defun agent-shell-viewport--buffer (&key shell-buffer existing-only)
   "Get the viewport buffer associated with a SHELL-BUFFER.
 
-With EXISTING-ONLY, only return existing buffers without creating."
-  (when-let* ((shell-buffer (or shell-buffer
-                                (agent-shell--shell-buffer))))
+With EXISTING-ONLY, only return existing buffers without creating.
+The association survives renaming either buffer.  For example, a renamed
+viewport is reused even when its name no longer has a viewport suffix."
+  (when-let* ((shell-buffer (if shell-buffer
+                               (get-buffer shell-buffer)
+                             (agent-shell--shell-buffer)))
+              ((buffer-live-p shell-buffer)))
     (with-current-buffer shell-buffer
-      (let* ((viewport-buffer-name (concat (buffer-name (get-buffer shell-buffer))
-                                           agent-shell-viewport--suffix))
-             (viewport-buffer (get-buffer viewport-buffer-name)))
-        (if viewport-buffer
-            viewport-buffer
-          (if existing-only
-              nil
-            (with-current-buffer (get-buffer-create viewport-buffer-name)
-              (agent-shell-viewport-edit-mode)
-              (current-buffer))))))))
+      (let* ((state (if existing-only
+                        agent-shell--state
+                      (agent-shell--state)))
+             (viewport-buffer (map-elt state :viewport-buffer)))
+        (cond
+         ((buffer-live-p viewport-buffer)
+          (unless (eq shell-buffer (agent-shell-viewport--shell-buffer viewport-buffer))
+            (user-error "Agent shell and viewport association disagree"))
+          viewport-buffer)
+         ((not existing-only)
+          (setq viewport-buffer (generate-new-buffer
+                                 (concat (buffer-name) agent-shell-viewport--suffix)))
+          (map-put! state :viewport-buffer viewport-buffer)
+          (with-current-buffer viewport-buffer
+            (setq-local agent-shell-viewport--shell-buffer shell-buffer)
+            (agent-shell-viewport-edit-mode))
+          viewport-buffer))))))
+
+(defun agent-shell-viewport--sync-buffer-name ()
+  "Update the viewport name after its shell buffer is renamed."
+  (when-let* ((state agent-shell--state)
+              ((not (equal (buffer-name) (map-elt state :last-buffer-name)))))
+    (map-put! state :last-buffer-name (buffer-name))
+    (when-let* ((viewport-buffer (map-elt state :viewport-buffer))
+                ((buffer-live-p viewport-buffer))
+                (name (concat (buffer-name) agent-shell-viewport--suffix)))
+      (with-current-buffer viewport-buffer
+        (rename-buffer name t)))))
 
 (cl-defun agent-shell-viewport--setup-reply (&key quoted-text)
   "Set up the buffer to compose a reply.
@@ -1638,14 +1664,21 @@ on current major mode."
 (cl-defun agent-shell-viewport--shell-buffer (&optional viewport-buffer)
   "Get the shell buffer associated with VIEWPORT-BUFFER.
 
-Derives shell buffer name by removing the viewport suffix from buffer name.
-Returns nil if VIEWPORT-BUFFER is not a viewport buffer or shell doesn't exist."
-  (when-let* ((viewport-name (buffer-name (or viewport-buffer (current-buffer))))
-              ((string-suffix-p agent-shell-viewport--suffix viewport-name))
-              (shell-name (substring viewport-name 0
-                                     (- (length viewport-name)
-                                        (length agent-shell-viewport--suffix)))))
-    (get-buffer shell-name)))
+Uses the buffer association regardless of either buffer's name.
+Returns nil if VIEWPORT-BUFFER is not a viewport or its shell is dead."
+  (when-let* ((viewport-buffer (get-buffer (or viewport-buffer (current-buffer))))
+              ((buffer-live-p viewport-buffer))
+              ((with-current-buffer viewport-buffer
+                 (derived-mode-p 'agent-shell-viewport-view-mode
+                                 'agent-shell-viewport-edit-mode)))
+              (shell-buffer (buffer-local-value 'agent-shell-viewport--shell-buffer
+                                                viewport-buffer))
+              ((buffer-live-p shell-buffer))
+              ((with-current-buffer shell-buffer (derived-mode-p 'agent-shell-mode)))
+              ((eq viewport-buffer
+                   (map-elt (buffer-local-value 'agent-shell--state shell-buffer)
+                            :viewport-buffer))))
+    shell-buffer))
 
 (defun agent-shell-viewport--clean-up ()
   "Clean up resources.

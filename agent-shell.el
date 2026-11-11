@@ -1328,6 +1328,8 @@ HEARTBEAT, AUTHENTICATE-REQUEST-MAKER, and optionally
 OUTGOING-REQUEST-DECORATOR (passed through to `acp-make-client')."
   (list (cons :agent-config agent-config)
         (cons :buffer buffer)
+        (cons :last-buffer-name (when (buffer-live-p buffer) (buffer-name buffer)))
+        (cons :viewport-buffer nil)
         (cons :client nil)
         (cons :client-maker client-maker)
         (cons :outgoing-request-decorator outgoing-request-decorator)
@@ -2154,6 +2156,30 @@ associated viewport buffer exists, switch to that instead."
                              :shell-buffer shell-buffer
                              :existing-only t))
                           shell-buffer))))
+
+;;;###autoload
+(cl-defun agent-shell-rename-buffer (&key name shell-buffer)
+  "Rename shell buffer and its associated viewport.
+
+When NAME is nil, prompt for a new name.  SHELL-BUFFER defaults to
+the shell associated with the current shell or viewport buffer.
+
+For example, (agent-shell-rename-buffer :name \"Codex: tests\") keeps
+the same shell process and unsent viewport draft."
+  (declare (modes agent-shell-mode
+                  agent-shell-viewport-view-mode
+                  agent-shell-viewport-edit-mode))
+  (interactive)
+  (let ((shell-buffer (if shell-buffer
+                          (get-buffer shell-buffer)
+                        (agent-shell--current-shell))))
+    (unless (and (buffer-live-p shell-buffer)
+                 (with-current-buffer shell-buffer
+                   (derived-mode-p 'agent-shell-mode)))
+      (user-error "Not in a shell or viewport buffer"))
+    (shell-maker-set-buffer-name
+     shell-buffer (string-trim (or name (read-string "Rename shell: "
+                                                    (buffer-name shell-buffer)))))))
 
 (defun agent-shell-version ()
   "Show `agent-shell' mode version."
@@ -5377,6 +5403,7 @@ variable (see makunbound)"))
       (setq-local filter-buffer-substring-function #'agent-shell--filter-buffer-substring)
       (setq-local beginning-of-defun-function #'agent-shell--beginning-of-block)
       (setq-local end-of-defun-function #'agent-shell--end-of-block)
+      (keymap-set agent-shell-mode-map "<remap> <rename-buffer>" #'agent-shell-rename-buffer)
       (add-hook 'xref-backend-functions #'agent-shell-markdown-xref-backend nil t)
       (agent-shell--update-header-and-mode-line)
       (add-hook 'kill-buffer-hook #'agent-shell--clean-up nil t)
@@ -5386,6 +5413,7 @@ variable (see makunbound)"))
                 #'agent-shell--prompt-queue-confirm-kill-emacs)
       (add-hook 'change-major-mode-hook #'agent-shell--clean-up nil t)
       (add-hook 'window-configuration-change-hook #'agent-shell--resize-header nil t)
+      (add-hook 'buffer-list-update-hook #'agent-shell-viewport--sync-buffer-name nil t)
       (agent-shell-ui-mode +1)
       (add-hook 'agent-shell-ui-post-expand-fragment-at-point-hook
                 #'agent-shell--render-markdown nil t)
@@ -5402,7 +5430,6 @@ variable (see makunbound)"))
       (defalias 'agent-shell-next-input #'comint-next-input)
       (defalias 'agent-shell-search-history #'shell-maker-search-history)
       (defalias 'agent-shell-newline #'newline)
-      (defalias 'agent-shell-rename-buffer #'shell-maker-rename-buffer)
       (defalias 'agent-shell-delete-interaction-at-point #'shell-maker-delete-interaction-at-point)
       (if agent-shell--transcript-file
           ;; Prefer agent-shell--transcript-file over shell-maker's own
@@ -9626,8 +9653,8 @@ CWD is the current buffer's `agent-shell-cwd', which is computed if nil."
   "Get an `agent-shell' buffer for the current project.
 
 Resolution order:
-1. If VIEWPORT-BUFFER is provided, derive shell buffer from its name.
-2. If inside of a viewport buffer, derive shell buffer from its name.
+1. If VIEWPORT-BUFFER is provided, return its associated shell buffer.
+2. If inside of a viewport buffer, return its associated shell buffer.
 3. If currently in an `agent-shell-mode' buffer, return it.
 4. If there are shells in current project, return the first one found.
 5. Otherwise, ask user to pick one.
@@ -9636,22 +9663,32 @@ When NO-CREATE is nil (default), prompt to create a new shell if none exists.
 When NO-CREATE is non-nil, return existing shell or nil/error if none exists.
 When NO-ERROR is non-nil, return nil instead of raising an error.
 
+An orphaned viewport never falls back to another shell or creates one.
+
 Returns a buffer object or nil."
   (let* (;; Computed only when looking for a shell in the current project,
          ;; and reused when creating one (which only happens after that), since
          ;; `agent-shell-cwd-function' may be expensive or interactive.
          (cwd nil)
-         (shell-buffer (or (agent-shell-viewport--shell-buffer
-                            (or viewport-buffer (current-buffer)))
-                           (if (derived-mode-p 'agent-shell-mode)
-                               (current-buffer)
-                             (seq-first (agent-shell-project-buffers
-                                         (setq cwd (agent-shell-cwd))))))))
+         (viewport-buffer (or viewport-buffer
+                              (when (derived-mode-p 'agent-shell-viewport-view-mode
+                                                    'agent-shell-viewport-edit-mode)
+                                (current-buffer))))
+         (shell-buffer (cond
+                        (viewport-buffer
+                         (agent-shell-viewport--shell-buffer viewport-buffer))
+                        ((derived-mode-p 'agent-shell-mode)
+                         (current-buffer))
+                        (t
+                         (seq-first (agent-shell-project-buffers
+                                     (setq cwd (agent-shell-cwd))))))))
     (if shell-buffer
         shell-buffer
-      (if no-create
+      (if (or no-create viewport-buffer)
           (unless no-error
-            (user-error "No agent shell buffers available for current project"))
+            (user-error (if viewport-buffer
+                            "This viewport has no live agent shell"
+                          "No agent shell buffers available for current project")))
         (if (and (eq agent-shell-session-strategy 'new-deferred)
                  (agent-shell-buffers))
             ;; TODO: Consolidate choices with `agent-shell--prompt-select-session'.
@@ -9741,12 +9778,7 @@ Result is of the form ((:prompt . PROMPT) (:response . RESPONSE))."
          (current-buffer))
         ((or (derived-mode-p 'agent-shell-viewport-view-mode)
              (derived-mode-p 'agent-shell-viewport-edit-mode))
-         (seq-first (seq-filter (lambda (shell-buffer)
-                                  (equal (agent-shell-viewport--buffer
-                                          :shell-buffer shell-buffer
-                                          :existing-only t)
-                                         (current-buffer)))
-                                (agent-shell-buffers))))))
+         (agent-shell-viewport--shell-buffer))))
 
 ;;;###autoload
 (cl-defun agent-shell-shell-buffer (&key viewport-buffer no-error no-create)

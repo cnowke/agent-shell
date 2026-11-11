@@ -806,6 +806,8 @@ You can select and start any of the known agent shells (see =agent-shell-agent-c
 
 Viewport is an alternative interface for composing prompts and viewing one request/response interaction at a time.  It uses a separate buffer named after its associated shell with =" [viewport]"= appended.  This buffer switches between =agent-shell-viewport-edit-mode= while composing and =agent-shell-viewport-view-mode= while reading.
 
+=C-x x r= in a shell renames it and updates its existing viewport's name.  =M-x agent-shell-rename-buffer= also works from a viewport.  Renaming either buffer preserves their association and any unsent viewport draft.
+
 Use one of these entry points to create and initialize the viewport buffer:
 
 - From an agent shell, type =C-c C-o= (=agent-shell-other-buffer=).  At the live prompt this opens the viewport for composing; from an earlier interaction it opens the viewport at that interaction.  Use =C-c C-o= again to return to the shell (=o= also works from viewport view mode).
@@ -1417,7 +1419,7 @@ always go to Evil modes if you need to with ~C-z~).
 | r                                                     | agent-shell-quote-region                                | Quote the active region into the shell's latest prompt.                       |
 |                                                       | agent-shell-qwen-start                                  | Start an interactive Qwen Code CLI agent shell.                               |
 |                                                       | agent-shell-reload                                      | Reload the current session by restarting with the same session ID.            |
-| C-x x r                                               | agent-shell-rename-buffer                               | Rename current shell buffer.                                                  |
+| C-x x r                                               | agent-shell-rename-buffer                               | Rename shell buffer and its associated viewport.                               |
 |                                                       | agent-shell-reset-logs                                  | Reset all log buffers.                                                        |
 |                                                       | agent-shell-restart                                     | Clear conversation by restarting the agent shell in the same project.         |
 |                                                       | agent-shell-resume-session                              | Resume an existing agent session by SESSION-ID.                               |
