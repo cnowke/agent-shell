@@ -10,6 +10,37 @@
   (file-name-directory (or load-file-name buffer-file-name))
   "Directory holding this test file.")
 
+(ert-deftest agent-shell--fs-write-preserves-buffer-markers-test ()
+  "An ACP write updates the file and preserves markers in unchanged text."
+  (let* ((before "prefix\nold\nsuffix\n")
+         (after "prefix\nexpanded\nsuffix\n")
+         (file (make-temp-file "agent-shell-write" nil ".txt" before))
+         (make-backup-files nil)
+         target marker response)
+    (unwind-protect
+        (with-temp-buffer
+          (setq major-mode 'agent-shell-mode)
+          (setq-local agent-shell--state (agent-shell--make-state :buffer (current-buffer)))
+          (setq target (find-file-noselect file)
+                marker (with-current-buffer target
+                         (copy-marker (1+ (string-match "suffix" before)))))
+          (cl-letf (((symbol-function 'acp-send-response)
+                     (lambda (&rest args) (setq response (plist-get args :response)))))
+            (agent-shell--on-fs-write-text-file-request
+             :state agent-shell--state
+             :acp-request `((id . 123) (params (path . ,file) (content . ,after)))))
+          (should (equal (map-elt response :request-id) 123))
+          (should-not (map-elt response :error))
+          (should (map-contains-key response :result))
+          (should (equal (with-current-buffer target (buffer-string)) after))
+          (should (= (marker-position marker) (1+ (string-match "suffix" after))))
+          (should (equal (with-temp-buffer (insert-file-contents file) (buffer-string)) after)))
+      (when marker (set-marker marker nil))
+      (when (buffer-live-p target)
+        (with-current-buffer target (set-buffer-modified-p nil))
+        (kill-buffer target))
+      (delete-file file))))
+
 (ert-deftest agent-shell-make-environment-variables-test ()
   "Test `agent-shell-make-environment-variables' function."
   ;; Test basic key-value pairs
@@ -8270,7 +8301,7 @@ command runs locally instead of on the remote host."
             (agent-shell-insert-shell-command-output))
           (should (equal process-directory "/ssh:user@host:/project/"))
           (should process-file-handler)
-          (when-let ((output-buffer (get-buffer "*pwd*")))
+          (when-let* ((output-buffer (get-buffer "*pwd*")))
             (kill-buffer output-buffer)))
       (kill-buffer shell-buffer))))
 

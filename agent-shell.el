@@ -4099,7 +4099,12 @@ function before returning."
                 (agent-shell--call-with-inhibited-minor-modes
                  agent-shell-write-inhibit-minor-modes
                  (lambda ()
-                   (replace-buffer-contents content-buffer 1.0)))
+                   (replace-region-contents
+                    (point-min) (point-max)
+                    (if (>= emacs-major-version 31)
+                        content-buffer
+                      (lambda () content-buffer))
+                    1.0)))
                 (basic-save-buffer)))))
         (agent-shell--emit-event
          :event 'file-write
@@ -6973,12 +6978,12 @@ Return file path of the generated SVG."
 INSTALL-INSTRUCTIONS is optional installation guidance.
 
 When `default-directory' is remote, suggest `tramp-remote-path'
-instead of `exec-path'.  For example, with `default-directory'
-set to \"/ssh:host:/project/\" and EXECUTABLE \"agent\":
+instead of the variable `exec-path'.  For example, with
+`default-directory' set to \"/ssh:host:/project/\" and EXECUTABLE \"agent\":
 
   Executable \"agent\" not found on host.  Do you need
   (add-to-list \\='tramp-remote-path \"/remote/path/to/consider/\")
-  followed by M-x tramp-cleanup-connection?"
+  followed by \\[tramp-cleanup-connection]?"
   (concat (if-let* ((host (file-remote-p default-directory 'host)))
               (format "Executable \"%s\" not found on %s.  Do you need (add-to-list 'tramp-remote-path \"/remote/path/to/consider/\") followed by M-x tramp-cleanup-connection?" executable host)
             (format "Executable \"%s\" not found.  Do you need (add-to-list 'exec-path \"another/path/to/consider/\")?" executable))

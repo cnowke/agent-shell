@@ -12,6 +12,8 @@
 (require 'cl-lib)
 (require 'ert)
 
+(defvar native-comp-enable-subr-trampolines t)
+
 (load-file (expand-file-name "../agent-shell-markdown.el"
                              (file-name-directory
                               (or load-file-name buffer-file-name))))
@@ -5212,14 +5214,16 @@ plainer `#L10-24' both have to land."
 
 With `url-handler-mode' on, `file-exists-p' on an https URL makes a
 network request, so remote URLs must be rejected before it runs."
-  (cl-letf (((symbol-function 'file-exists-p)
-             (lambda (file)
-               (error "Unexpected `file-exists-p' on %s" file))))
-    (should-not (agent-shell-markdown--parse-local-link
-                 "https://gitlab.com/group/project/-/merge_requests/7338"))
-    (should-not (agent-shell-markdown--parse-local-link "http://example.com/foo.el#L10"))
-    (should-not (agent-shell-markdown--parse-local-link "ftp://example.com/foo.el:3"))
-    (should-not (agent-shell-markdown--parse-local-link "git+ssh://example.com/repo"))))
+  ;; The parser is loaded from source, so the stub needs no native trampoline.
+  (let ((native-comp-enable-subr-trampolines nil))
+    (cl-letf (((symbol-function 'file-exists-p)
+               (lambda (file)
+                 (error "Unexpected `file-exists-p' on %s" file))))
+      (should-not (agent-shell-markdown--parse-local-link
+                   "https://gitlab.com/group/project/-/merge_requests/7338"))
+      (should-not (agent-shell-markdown--parse-local-link "http://example.com/foo.el#L10"))
+      (should-not (agent-shell-markdown--parse-local-link "ftp://example.com/foo.el:3"))
+      (should-not (agent-shell-markdown--parse-local-link "git+ssh://example.com/repo")))))
 
 (ert-deftest agent-shell-markdown--open-local-link-selects-range-test ()
   "Test `agent-shell-markdown--open-local-link' selects a linked range.
