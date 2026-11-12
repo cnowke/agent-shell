@@ -175,8 +175,8 @@ authenticate request shape (see its \"DEFAULT_AUTH_REQUEST\")."
 
 (defvar-local agent-shell-openai--terminal-output-snapshots nil
   "Alist of Codex tool-call IDs and terminal output state.
-Each entry holds reversed `:chunks' and whether the last rendered output
-was an incremental `:streaming' preview.  The last
+Each entry holds reversed `:chunks', their `:length', and whether the
+last rendered output was an incremental `:streaming' preview.  The last
 `:status' and `:raw-input' survive updates omitting those protocol fields.")
 
 (defun agent-shell-openai--subscribe-output-cleanup ()
@@ -241,10 +241,14 @@ Return ACP-NOTIFICATION after adaptation."
                             (stringp (map-nested-elt update '(rawOutput formatted_output)))))
            (chunks (cond (replacement (list snapshot))
                          ((stringp delta) (cons delta (map-elt previous :chunks)))
-                         (t (map-elt previous :chunks)))))
+                         (t (map-elt previous :chunks))))
+           (size (cond (replacement (length snapshot))
+                       ((stringp delta) (+ (map-elt previous :length 0) (length delta)))
+                       (t (map-elt previous :length 0)))))
       (unless agent-shell-openai--terminal-output-snapshots
 	(agent-shell-openai--subscribe-output-cleanup))
       (setf (map-elt update :output-chunks) chunks
+            (map-elt update :output-length) size
             (map-elt update :output-append) (map-elt previous :streaming)
             (map-elt update :output-input-changed) (not (equal input (map-elt previous :raw-input)))
             (map-elt update :output-labels-changed)
@@ -267,6 +271,7 @@ Return ACP-NOTIFICATION after adaptation."
                               (content (type . "text") (text . ,output)))))))
       (setf (map-elt agent-shell-openai--terminal-output-snapshots tool-call-id)
             (list (cons :chunks chunks)
+                  (cons :length size)
                   (cons :raw-input input)
                   (cons :status status)
                   (cons :streaming

@@ -25,6 +25,7 @@
 (eval-when-compile
   (require 'cl-lib))
 (require 'map)
+(require 'seq)
 (require 'subr-x)
 
 (declare-function agent-shell--active-requests-p "agent-shell")
@@ -53,6 +54,9 @@
 (defvar agent-shell--transcript-file)
 (defvar agent-shell-tool-use-expand-by-default)
 
+(defconst agent-shell--tool-output-preview-length 32768
+  "Maximum number of terminal output characters previewed during execution.")
+
 (defun agent-shell--tool-output-chunks-markdown (chunks)
   "Join reversed terminal output CHUNKS into a fenced Markdown block.
 For example, \='(\"world\\n\" \"hello\\n\") becomes
@@ -67,19 +71,38 @@ For example, \='(\"world\\n\" \"hello\\n\") becomes
         (concat fence "\n" (substring output 0 end) "\n" fence)))))
 
 (defun agent-shell--tool-output-stream-text (update)
-  "Return literal terminal text to insert for normalized UPDATE.
-Append only `:output-delta' while streaming.  An input change rebuilds
-the body from reversed `:output-chunks' so the new command stays visible.
-Metadata-only updates otherwise leave the body untouched."
+  "Return the new live terminal preview text for normalized UPDATE.
+An appended delta only visits its new characters.  A replacement reads
+at most `agent-shell--tool-output-preview-length' characters from the
+reversed `:output-chunks'.  Metadata-only updates return nil unless the
+input details changed and their preview needs replacing.
+The normalized `:output-length' counts all captured characters.
+Complete output remains available for rendering when execution finishes."
   (unless (and (map-elt update :output-unchanged)
                (not (map-elt update :output-input-changed)))
-    (propertize
-     (if (and (map-elt update :output-append)
-              (not (map-elt update :output-input-changed)))
-         (map-elt update :output-delta)
-       (apply #'concat (reverse (map-elt update :output-chunks))))
-     'agent-shell-markdown-frozen t
-     'font-lock-face 'fixed-pitch)))
+    (let* ((limit agent-shell--tool-output-preview-length)
+           (append (and (map-elt update :output-append)
+                        (not (map-elt update :output-input-changed))))
+           (start (if append
+                      (- (map-elt update :output-length)
+                         (length (map-elt update :output-delta)))
+                    0))
+           (remaining (max 0 (- limit start)))
+           (chunks (if append
+                       (list (map-elt update :output-delta))
+                     (reverse (map-elt update :output-chunks))))
+           parts)
+      (while (and chunks (> remaining 0))
+        (let ((chunk (seq-first chunks)))
+          (push (substring chunk 0 (min remaining (length chunk))) parts)
+          (setq remaining (max 0 (- remaining (length chunk)))
+                chunks (seq-rest chunks))))
+      (when (and (<= start limit) (> (map-elt update :output-length) limit))
+        (push "\n\nOutput continues; complete output will appear when the command finishes.\n" parts))
+      (when parts
+        (propertize (apply #'concat (nreverse parts))
+                    'agent-shell-markdown-frozen t
+                    'font-lock-face 'fixed-pitch)))))
 
 (cl-defun agent-shell--update-tool-call-output (&key state update finalize)
   "Render tool-call output from normalized UPDATE in STATE.
