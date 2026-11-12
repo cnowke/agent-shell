@@ -158,9 +158,10 @@ Only a busy shell with nowhere to type falls back to the queue."
 
 (ert-deftest agent-shell--dnd-handle-file-url-copies-transient-file-test ()
   "A drop from the temp directory attaches the copy, not the vanishing original."
-  (let ((file (make-temp-file "agent-shell-dnd" nil ".png" "pixels"))
-        (screenshots-dir (make-temp-file "agent-shell-dnd-shots" t))
-        (inserted nil))
+  (let* ((temporary-file-directory (make-temp-file "agent-shell-dnd-" t))
+         (file (make-temp-file "agent-shell-dnd" nil ".png" "pixels"))
+         (screenshots-dir (make-temp-file "agent-shell-dnd-shots" t))
+         (inserted nil))
     (unwind-protect
         (cl-letf (((symbol-function 'agent-shell-insert)
                    (lambda (&rest args)
@@ -179,15 +180,16 @@ Only a busy shell with nowhere to type falls back to the queue."
                             :agent-cwd (agent-shell-cwd))))
             ;; The original is macOS's to delete, not ours.
             (should (file-exists-p file))))
-      (delete-file file)
-      (delete-directory screenshots-dir t))))
+      (delete-directory temporary-file-directory t))))
 
 (ert-deftest agent-shell--dnd-keep-file-test ()
   "A transient file is copied with its extension, other files stay put.
 Transient means under the variable `temporary-file-directory', unless it
 is a file of a project that itself lives there."
-  (let ((file (make-temp-file "agent-shell-dnd" nil ".png" "pixels"))
-        (screenshots-dir (make-temp-file "agent-shell-dnd-shots" t)))
+  ;; Directory attribute comparisons must not race other temporary-file users.
+  (let* ((temporary-file-directory (make-temp-file "agent-shell-dnd-" t))
+         (file (make-temp-file "agent-shell-dnd" nil ".png" "pixels"))
+         (screenshots-dir (make-temp-file "agent-shell-dnd-shots" t)))
     (unwind-protect
         (cl-letf (((symbol-function 'agent-shell--dot-subdir)
                    (lambda (_subdir) screenshots-dir)))
@@ -200,8 +202,7 @@ is a file of a project that itself lives there."
                          file))
           (let ((temporary-file-directory agent-shell-dnd-test--no-temp-dir))
             (should (equal (agent-shell--dnd-keep-file file) file))))
-      (delete-file file)
-      (delete-directory screenshots-dir t))))
+      (delete-directory temporary-file-directory t))))
 
 (ert-deftest agent-shell--enable-dnd-installs-buffer-local-handler-test ()
   "Enabling drops routes the local file: forms to this buffer's handler.
