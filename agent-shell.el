@@ -3774,112 +3774,11 @@ Clears STATE's `:expanded-activity-group'."
             :data (list (cons :tool-call-id (map-nested-elt acp-notification '(params update toolCallId)))
                         (cons :tool-call (map-nested-elt state `(:tool-calls ,(map-nested-elt acp-notification '(params update toolCallId)))))
                         (cons :meta (map-nested-elt acp-notification '(params update _meta)))))
-           (let* ((update (map-nested-elt acp-notification '(params update)))
-                  (streaming (and (map-elt update :output-chunks)
-                                  (not (member (map-elt update 'status) '("completed" "failed")))
-                                  (or (stringp (map-elt update :output-delta))
-                                      (map-elt update :output-unchanged))))
-                  (diffs (map-nested-elt state `(:tool-calls ,(map-elt update 'toolCallId) :diffs)))
-                  (output (unless streaming
-                            (concat "\n\n"
-                                    (agent-shell--tool-call-update-output-markdown update)
-                                    "\n\n")))
-                  (diff-text (agent-shell--format-diffs-as-text diffs))
-                  (full-body (unless streaming
-                               (if diff-text (concat output "\n\n" diff-text) output)))
-                  (body-text (if streaming
-                                 (agent-shell--tool-output-preview update)
-                               (agent-shell--truncate-tool-output-lines full-body)))
-                  ;; Whether this update introduces a new tool call rather than
-                  ;; editing an earlier one in place.  Captured before the
-                  ;; group-id helper assigns a group, so an in-place update
-                  ;; does not look new.
-                  (tool-newly-grouped
-                   (not (map-nested-elt state `(:tool-calls ,(map-nested-elt acp-notification '(params update toolCallId)) :group-id)))))
-             ;; Save complete output when a tool or its turn finishes.
-             (when (or (member (map-elt update 'status) '("completed" "failed"))
-                       (map-elt update :output-final))
-               (agent-shell--append-transcript
-                :text (agent-shell--make-transcript-tool-call-entry
-                       :status (map-nested-elt state `(:tool-calls ,(map-elt update 'toolCallId) :status))
-                       :title (map-nested-elt state `(:tool-calls ,(map-nested-elt acp-notification '(params update toolCallId)) :title))
-                       :kind (map-nested-elt state `(:tool-calls ,(map-nested-elt acp-notification '(params update toolCallId)) :kind))
-                       :description (map-nested-elt state `(:tool-calls ,(map-nested-elt acp-notification '(params update toolCallId)) :description))
-                       :command (map-nested-elt state `(:tool-calls ,(map-nested-elt acp-notification '(params update toolCallId)) :command))
-                       :parameters (agent-shell--extract-tool-parameters
-                                    (map-nested-elt state `(:tool-calls ,(map-nested-elt acp-notification '(params update toolCallId)) :raw-input)))
-                       :output (if (map-elt update :output-chunks) full-body body-text))
-                :file-path agent-shell--transcript-file))
-             ;; Hide permission after sending response.
-             ;; Status is completed or failed so the user
-             ;; likely selected one of: accepted/rejected/always.
-             ;; Remove stale permission dialog.
-             (when (member (map-nested-elt acp-notification '(params update status))
-                           '("completed" "failed"))
-               ;; block-id must be the same as the one used as
-               ;; agent-shell--update-fragment param by "session/request_permission".
-               (agent-shell--delete-fragment :state state :block-id (format "permission-%s" (map-nested-elt acp-notification '(params update toolCallId)))))
-             (let* ((tool-call-labels (agent-shell-make-tool-call-label state (map-nested-elt acp-notification '(params update toolCallId))))
-                    (group-id (agent-shell--activity-group-id
-                               state (map-nested-elt acp-notification '(params update toolCallId))))
-                    (tool-call-id (map-nested-elt acp-notification '(params update toolCallId)))
-                    (saved-command (map-nested-elt state `(:tool-calls ,tool-call-id :command)))
-                    ;; Prepend fenced command to body for Bash-like
-                    ;; tools.
-                    (command-block (when saved-command
-                                     (concat "```console\n" saved-command "\n```")))
-                    ;; For tools without a `command' parameter such
-                    ;; as MCP tools, render the input parameters
-                    ;; above the body so the user can inspect
-                    ;; them.  Standard tool kinds like "read" have
-                    ;; their parameters baked into the title, so we
-                    ;; only render parameters for non-standard tools
-                    ;; like MCP calls.
-                    (tool-call-kind (map-nested-elt state `(:tool-calls ,tool-call-id :kind)))
-                    (saved-input (map-nested-elt state `(:tool-calls ,tool-call-id :raw-input)))
-                    ;; A questionnaire's input is the questions themselves,
-                    ;; which the tool call's own `content' already spells out
-                    ;; in prose, so dumping it as JSON only repeats it.
-                    (input-block (when (and (member tool-call-kind '(nil "other"))
-                                            saved-input
-                                            (not saved-command)
-                                            (not (agent-shell-elicitation--questionnaire-p
-                                                  saved-input)))
-                                   (agent-shell--format-tool-call-input saved-input))))
-               (funcall (if streaming
-                            #'agent-shell--update-streamed-fragment
-                          #'agent-shell--update-fragment)
-                :state state
-                :block-id (map-nested-elt acp-notification '(params update toolCallId))
-                :label-left (map-elt tool-call-labels :status)
-                :label-right (map-elt tool-call-labels :title)
-                :group-id group-id
-                :group-label agent-shell--activity-group-label
-                :group-expanded (agent-shell--activity-group-initial-expanded-p)
-                :body (cond
-                       (streaming body-text)
-                       ;; A form is showing these questions interactively
-                       ;; just below, so repeating them here would ask twice.
-                       ((agent-shell-elicitation--pending-for-tool-call-p
-                         :state state :tool-call-id tool-call-id)
-                        "")
-                       (command-block
-                        (concat command-block "\n\n" (string-trim body-text)))
-                       (input-block
-                        (concat input-block "\n\n" (string-trim body-text)))
-                       (t
-                        (string-trim body-text)))
-                :append (and streaming (or (map-elt update :output-append)
-                                          (map-elt update :output-unchanged)))
-                :render-body (not streaming)
-                :expanded agent-shell-tool-use-expand-by-default
-                :above-last-prompt (not (agent-shell--active-requests-p state)))
-               (unless streaming
-                 (agent-shell--refresh-activity-group-header state group-id)
-                 (agent-shell--sync-activity-group-fold :state state :group-id group-id)))
-             ;; Only advance the run boundary when this update introduced a new
-             ;; tool call (appended at the end).  An in-place update of an
-             ;; earlier tool must not erase an intervening entry's boundary.
+           (let ((tool-newly-grouped
+                  (not (map-nested-elt state `(:tool-calls ,(map-nested-elt acp-notification '(params update toolCallId)) :group-id)))))
+             (agent-shell--update-tool-call-output
+              :state state :update (map-nested-elt acp-notification '(params update)))
+             ;; An update to an earlier tool must preserve intervening entries.
              (when tool-newly-grouped
                (map-put! state :last-entry-type "tool_call_update"))))
           ((equal (map-nested-elt acp-notification '(params update sessionUpdate)) "available_commands_update")

@@ -537,6 +537,20 @@ state, because label-less fragments don't follow `state :collapsed'
           (list (cons :start body-start)
                 (cons :end insert-end)))))))
 
+(defun agent-shell-ui--prepare-body (body)
+  "Normalize BODY's surrounding whitespace for display.
+A string marked `agent-shell-ui-preserve-whitespace' at its first character
+is inserted verbatim.  For example, a literal terminal preview retains its
+leading spaces and blank lines across subsequent appends."
+  (unless (and (not (string-empty-p body))
+               (get-text-property 0 'agent-shell-ui-preserve-whitespace body))
+    (when (string-prefix-p "\n" body)
+      (setq body (string-trim-left body "\n")))
+    (when (string-suffix-p "\n\n" body)
+      (setq body (concat (string-trim-right body) "\n\n")))
+    (setq body (string-remove-prefix "  " body)))
+  body)
+
 (defun agent-shell-ui--replace-body (body-range new-body qualified-id _collapsed)
   "Replace the body region described by BODY-RANGE with NEW-BODY.
 
@@ -555,20 +569,15 @@ matches the body's current visibility, not caller-supplied state."
     (delete-region body-start body-end)
     (goto-char body-start)
     (when (and (stringp new-body) (not (string-empty-p new-body)))
-      (let ((trimmed new-body))
-        (when (string-prefix-p "\n" trimmed)
-          (setq trimmed (string-trim-left trimmed "\n")))
-        (when (string-suffix-p "\n\n" trimmed)
-          (setq trimmed (concat (string-trim-right trimmed) "\n\n")))
-        (let ((insert-start (point)))
-          (insert (agent-shell-ui--indent-text
-                   (string-remove-prefix "  " trimmed)
-                   (concat (or (map-elt state :group-indent) "") "  ")))
-          (let ((insert-end (point)))
-            (agent-shell-ui--apply-body-section-properties
-             insert-start insert-end qualified-id state body-invisible)
-            (agent-shell-ui--apply-trailing-whitespace-invisible
-             insert-start insert-end)))))
+      (let ((insert-start (point)))
+        (insert (agent-shell-ui--indent-text
+                 (agent-shell-ui--prepare-body new-body)
+                 (concat (or (map-elt state :group-indent) "") "  ")))
+        (let ((insert-end (point)))
+          (agent-shell-ui--apply-body-section-properties
+           insert-start insert-end qualified-id state body-invisible)
+          (agent-shell-ui--apply-trailing-whitespace-invisible
+           insert-start insert-end))))
     ;; Point sits at the end of what we wrote (or at BODY-START when the
     ;; new body was empty), so the caller can take the new range from here
     ;; rather than searching the block for it again (issue #757).
@@ -1171,16 +1180,8 @@ indents a child's header line under its group header."
     (when body
       (when (or label-left label-right)
         (insert "\n\n"))
-      ;; Drop any leading body newlines as newlines are
-      ;; already inserted between labels and body.
-      (when (string-prefix-p "\n" body)
-        (setq body (string-trim-left body "\n")))
-      ;; Never leave more than two trailing newlines.
-      (when (string-suffix-p "\n\n" body)
-        (setq body (concat (string-trim-right body) "\n\n")))
       (setq body-start (point))
-      (let ((clean-body (string-remove-prefix "  " body)))
-        (insert (agent-shell-ui--indent-text clean-body body-indent)))
+      (insert (agent-shell-ui--indent-text (agent-shell-ui--prepare-body body) body-indent))
       (setq body-end (point))
       (add-text-properties body-start body-end
                            (append (list 'agent-shell-ui-section 'body
