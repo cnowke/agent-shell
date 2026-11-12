@@ -66,16 +66,15 @@ For example, \='(\"world\\n\" \"hello\\n\") becomes
       (let ((fence (make-string (max 3 (1+ (agent-shell--longest-backtick-run output))) ?`)))
         (concat fence "\n" (substring output 0 end) "\n" fence)))))
 
-(defun agent-shell--tool-output-stream-text (update)
+(defun agent-shell--tool-output-stream-text (update append)
   "Return literal terminal text to insert for normalized UPDATE.
-Append only `:output-delta' while streaming.  An input change rebuilds
-the body from reversed `:output-chunks' so the new command stays visible.
-Metadata-only updates otherwise leave the body untouched."
-  (unless (and (map-elt update :output-unchanged)
+APPEND inserts only `:output-delta'.  Otherwise rebuild the body from
+reversed `:output-chunks' so a newly rendered command includes all output.
+Metadata-only appends leave the body untouched."
+  (unless (and append (map-elt update :output-unchanged)
                (not (map-elt update :output-input-changed)))
     (propertize
-     (if (and (map-elt update :output-append)
-              (not (map-elt update :output-input-changed)))
+     (if append
          (map-elt update :output-delta)
        (apply #'concat (reverse (map-elt update :output-chunks))))
      'agent-shell-markdown-frozen t
@@ -84,7 +83,9 @@ Metadata-only updates otherwise leave the body untouched."
 (cl-defun agent-shell--update-tool-call-output (&key state update finalize)
   "Render tool-call output from normalized UPDATE in STATE.
 FINALIZE saves unfinished output on interruption or history replay without
-changing the tool's reported status, events, or activity-group fold state."
+changing the tool's reported status, events, or activity-group fold state.
+Retain the rendered `:output-chunks' on the tool call until finalization;
+buffered history may contain later output from turns omitted during replay."
   (let* ((tool-call-id (map-elt update 'toolCallId))
          (tool-call (map-nested-elt state (list :tool-calls tool-call-id)))
          (completed (member (map-elt tool-call :status) '("completed" "failed")))
@@ -97,7 +98,8 @@ changing the tool's reported status, events, or activity-group fold state."
                              (and (map-elt update :output-unchanged)
                                   (or (not (map-elt update :output-input-changed))
                                       (map-elt update :output-append))))))
-         (preview-append (and (not (map-elt update :output-input-changed))
+         (preview-append (and (map-contains-key tool-call :output-chunks)
+                              (not (map-elt update :output-input-changed))
                               (or (map-elt update :output-append)
                                   (map-elt update :output-unchanged))))
          (render-labels (or (not streaming) (not preview-append)
@@ -108,7 +110,7 @@ changing the tool's reported status, events, or activity-group fold state."
          (full-body (unless streaming
                       (if diff-text (concat output "\n\n" diff-text) output)))
          (body-text (if streaming
-                        (agent-shell--tool-output-stream-text update)
+                        (agent-shell--tool-output-stream-text update preview-append)
                       (agent-shell--truncate-tool-output-lines full-body)))
          (tool-call-labels (agent-shell-make-tool-call-label state tool-call-id))
          (group-id (agent-shell--activity-group-id state tool-call-id))
@@ -120,6 +122,10 @@ changing the tool's reported status, events, or activity-group fold state."
                                  (not (agent-shell-elicitation--questionnaire-p
                                        (map-elt tool-call :raw-input))))
                         (agent-shell--format-tool-call-input (map-elt tool-call :raw-input)))))
+    (when (and (map-elt update :output-chunks)
+               (or (not streaming) body-text (stringp (map-elt update :output-delta))))
+      (setf (map-elt (map-elt (map-elt state :tool-calls) tool-call-id) :output-chunks)
+            (and streaming (map-elt update :output-chunks))))
     (when finalize
       (agent-shell--save-tool-call
        state tool-call-id
@@ -180,15 +186,16 @@ changing the tool's reported status, events, or activity-group fold state."
 (defun agent-shell--tool-output-finalize (state snapshots)
   "Render and save unfinished terminal output from SNAPSHOTS in STATE.
 The turn may end without a completed tool update, for example on cancellation.
-Keep the agent's last reported status rather than inventing a completion."
+Keep the agent's last reported status rather than inventing a completion.
+Finalize the chunks retained by rendered previews, which may differ from
+SNAPSHOTS when history replay omits later turns."
   (let ((expanded (map-elt state :expanded-activity-group)))
     (dolist (entry snapshots)
-      (when (and (map-elt (cdr entry) :streaming)
-                 (map-nested-elt state (list :tool-calls (car entry))))
+      (when-let* ((chunks (map-nested-elt state (list :tool-calls (car entry) :output-chunks))))
         (agent-shell--update-tool-call-output
          :state state :finalize t
          :update (list (cons 'toolCallId (car entry))
-                       (cons :output-chunks (map-elt (cdr entry) :chunks))))
+                       (cons :output-chunks chunks)))
         (setf (map-elt (cdr entry) :streaming) nil)))
     (unless expanded
       (agent-shell--collapse-expanded-activity-group state))))

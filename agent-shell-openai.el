@@ -175,8 +175,8 @@ authenticate request shape (see its \"DEFAULT_AUTH_REQUEST\")."
 
 (defvar-local agent-shell-openai--terminal-output-snapshots nil
   "Alist of Codex tool-call IDs and terminal output state.
-Each entry holds reversed `:chunks' and whether the last rendered output
-was an incremental `:streaming' preview.  The last
+Each entry holds reversed `:chunks' and whether the last normalized update
+was `:streaming'.  The last
 `:status' and `:raw-input' survive updates omitting those protocol fields.")
 
 (defun agent-shell-openai--subscribe-output-cleanup ()
@@ -201,7 +201,9 @@ Unfinished tools may continue streaming after their prompt turn ends."
                                     (when-let* ((tool-call (map-nested-elt
                                                             (agent-shell--state)
                                                             (list :tool-calls (car entry)))))
-                                      (not (member (map-elt tool-call :status) '("completed" "failed")))))
+                                      (not (member (or (map-elt (cdr entry) :status)
+                                                       (map-elt tool-call :status))
+                                                   '("completed" "failed")))))
                                   agent-shell-openai--terminal-output-snapshots)))
                          (unless agent-shell-openai--terminal-output-snapshots
                            (agent-shell-unsubscribe :subscription subscription))))))))

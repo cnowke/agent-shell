@@ -199,8 +199,11 @@
                   (_meta (terminal_output_delta (data . ,text)))))
          (should (map-elt state :stream-render-pending))
          (cl-letf (((symbol-function 'agent-shell--append-transcript)
-                    (lambda (&rest args) (setq transcript (plist-get args :text)))))
-           (agent-shell--emit-event :event event :data '((:stop-reason . "cancelled"))))
+                    (lambda (&rest args) (setq transcript (plist-get args :text))))
+                   ((symbol-function 'agent-shell--shutdown) #'ignore))
+           (if (eq event 'clean-up)
+               (agent-shell--clean-up)
+             (agent-shell--emit-event :event event :data '((:stop-reason . "cancelled")))))
          (should (string-search text transcript))
          (should (string-search (string-trim-right text) (buffer-string)))
          (should-not (string-search "Output continues;" (buffer-string)))
@@ -211,6 +214,44 @@
                                        '("command" :streaming))))
          (should-not (map-elt state :stream-render-pending))
          (should-not (map-elt state :stream-render-timer)))))))
+
+(ert-deftest agent-shell-tool-output-request-settlement-finalizes-output-test ()
+  "Real prompt callbacks preserve output on success, cancellation, and failure."
+  (dolist (outcome '("end_turn" "cancelled" error))
+    (agent-shell-tool-output-tests--call-with-shell
+     (lambda (state)
+       (let ((text (apply #'concat (make-list 400 (concat (make-string 100 ?x) "\n"))))
+             (agent-shell-show-busy-indicator nil)
+             (agent-shell-show-usage-at-turn-end nil)
+             (agent-shell-activity-group-expand-by-default 'latest)
+             (transcript "")
+             callbacks)
+         (map-put! state :session '((:id . "test-session") (:title . "Test")))
+         (cl-letf (((symbol-function 'agent-shell--send-request)
+                    (lambda (&rest args) (setq callbacks args)))
+                   ((symbol-function 'agent-shell--finish-output) #'ignore)
+                   ((symbol-function 'agent-shell--start-idle-timer) #'ignore)
+                   ((symbol-function 'agent-shell--append-transcript)
+                    (lambda (&rest args)
+                      (setq transcript (concat transcript (plist-get args :text))))))
+           (agent-shell--send-command :prompt "Test" :shell-buffer (current-buffer))
+           (agent-shell-tool-output-tests--notify
+            state '((status . "in_progress") (title . "Command")
+                    (_meta (terminal_output_delta (data . "first\n")))))
+           (agent-shell-tool-output-tests--notify
+            state `((_meta (terminal_output_delta (data . ,text)))))
+           (should (map-elt state :stream-render-pending))
+           (if (eq outcome 'error)
+               (funcall (plist-get callbacks :on-failure) '((code . 123) (message . "Test failure")) nil)
+             (funcall (plist-get callbacks :on-success) `((stopReason . ,outcome))))
+           (should (string-search (string-trim-right text) (agent-shell-tool-output-tests--body state)))
+           (should (string-search text transcript))
+           (should (equal (map-nested-elt state '(:tool-calls "command" :status)) "in_progress"))
+           (should-not (map-nested-elt state '(:tool-calls "command" :output-chunks)))
+           (should-not (map-nested-elt agent-shell-openai--terminal-output-snapshots '("command" :streaming)))
+           (should-not (map-elt state :expanded-activity-group))
+           (should-not (map-elt state :stream-render-pending))
+           (should-not (map-elt state :stream-render-timer))))))))
 
 (ert-deftest agent-shell-tool-output-snapshot-resets-live-preview-test ()
   "A full snapshot replaces earlier output before subsequent deltas append."
@@ -228,6 +269,27 @@
      (should (string-search "snapshot\nsuffix" (buffer-string)))
      (agent-shell-tool-output-tests--notify state '((status . "completed")))
      (should (string-search "snapshot\nsuffix" (buffer-string))))))
+
+(ert-deftest agent-shell-tool-output-snapshot-metadata-does-not-finalize-preview-test ()
+  "Metadata after a full snapshot must not turn it into a streaming preview."
+  (agent-shell-tool-output-tests--call-with-shell
+   (lambda (state)
+     (agent-shell-tool-output-tests--notify
+      state '((status . "in_progress") (title . "Command")
+              (_meta (terminal_output_delta (data . "first\n")))))
+     (agent-shell-tool-output-tests--notify state '((rawOutput (formatted_output . "snapshot\n"))))
+     (agent-shell-tool-output-tests--notify state '((title . "Renamed")))
+     (let ((body (agent-shell-tool-output-tests--body state))
+           (assembler (symbol-function 'agent-shell--tool-output-chunks-markdown))
+           (assemblies 0))
+       (cl-letf (((symbol-function 'agent-shell--tool-output-chunks-markdown)
+                  (lambda (chunks)
+                    (setq assemblies (1+ assemblies))
+                    (funcall assembler chunks))))
+         (agent-shell--emit-event :event 'turn-complete))
+       (should (equal body (agent-shell-tool-output-tests--body state)))
+       (should (zerop assemblies))
+       (should-not (map-nested-elt state '(:tool-calls "command" :output-chunks)))))))
 
 (ert-deftest agent-shell-tool-output-preview-preserves-whitespace-test ()
   "Preserve leading spaces and newlines when creating or resetting a preview."
@@ -325,6 +387,83 @@
        (should (string-search (string-trim-right text)
                               (agent-shell-tool-output-tests--body state)))
        (should-not (string-search "Output continues;" (buffer-string)))))))
+
+(ert-deftest agent-shell-tool-output-truncated-restore-retains-visible-prefix-test ()
+  "Finalize the visible prefix even when a later snapshot or completion is omitted."
+  (dolist (middle '(((status . "completed"))
+                    ((status . "completed") (rawOutput (formatted_output . "omitted snapshot\n")))
+                    ((rawOutput (formatted_output . "omitted snapshot\n")))))
+    (agent-shell-tool-output-tests--call-with-shell
+     (lambda (state)
+       (let ((text (apply #'concat (make-list 400 (concat (make-string 100 ?x) "\n"))))
+             (agent-shell-session-restore-verbosity 'first-last))
+         (map-put! state :supports-session-load t)
+         (map-put! state :pending-restore (agent-shell--make-pending-restore))
+         (dolist (update
+                  `(((sessionUpdate . "user_message_chunk")
+                     (content (type . "text") (text . "First turn")))
+                    ((sessionUpdate . "tool_call_update") (toolCallId . "command")
+                     (title . "Command") (status . "in_progress")
+                     (_meta (terminal_output_delta (data . ,text))))
+                    ((sessionUpdate . "user_message_chunk")
+                     (content (type . "text") (text . "Omitted turn")))
+                    ((sessionUpdate . "tool_call_update") (toolCallId . "command") ,@middle)
+                    ((sessionUpdate . "user_message_chunk")
+                     (content (type . "text") (text . "Last turn")))
+                    ((sessionUpdate . "agent_message_chunk")
+                     (content (type . "text") (text . "Last response")))))
+           (agent-shell--on-notification
+            :state state
+            :acp-notification
+            (agent-shell--adapt-notification
+             :state state
+             :acp-notification `((method . "session/update") (params (update . ,update))))))
+         (cl-letf (((symbol-function 'agent-shell--create-bootstrapping-placeholders) #'ignore))
+           (agent-shell--render-pending-restore state))
+         (should (string-search (string-trim-right text) (agent-shell-tool-output-tests--body state)))
+         (should-not (string-search "Output continues;" (buffer-string)))
+         (should-not (string-search "omitted snapshot" (buffer-string)))
+         (should (string-search
+                  (string-trim-right text)
+                  (agent-shell--tool-call-update-output-markdown
+                   `((content . ,(map-nested-elt state '(:tool-calls "command" :content)))))))
+         (should-not (map-nested-elt state '(:tool-calls "command" :output-chunks)))
+         (if (map-elt middle 'status)
+             (should-not agent-shell-openai--terminal-output-snapshots)
+           (agent-shell-tool-output-tests--notify
+            state '((_meta (terminal_output_delta (data . "resumed\n")))))
+           (agent-shell--flush-stream-render state)
+           (should (equal (agent-shell-tool-output-tests--body state)
+                          "omitted snapshot\nresumed\n"))))))))
+
+(ert-deftest agent-shell-tool-output-restore-metadata-without-rendered-preview-test ()
+  "A selected metadata-only update reconstructs an earlier omitted stream."
+  (agent-shell-tool-output-tests--call-with-shell
+   (lambda (state)
+     (let ((agent-shell-session-restore-verbosity 'last))
+       (map-put! state :supports-session-load t)
+       (map-put! state :pending-restore (agent-shell--make-pending-restore))
+       (dolist (update
+                '(((sessionUpdate . "user_message_chunk")
+                   (content (type . "text") (text . "Omitted turn")))
+                  ((sessionUpdate . "tool_call_update") (toolCallId . "command")
+                   (status . "in_progress")
+                   (_meta (terminal_output_delta (data . "earlier output\n"))))
+                  ((sessionUpdate . "user_message_chunk")
+                   (content (type . "text") (text . "Selected turn")))
+                  ((sessionUpdate . "tool_call_update") (toolCallId . "command")
+                   (status . "in_progress") (title . "Renamed"))))
+         (agent-shell--on-notification
+          :state state
+          :acp-notification
+          (agent-shell--adapt-notification
+           :state state
+           :acp-notification `((method . "session/update") (params (update . ,update))))))
+       (cl-letf (((symbol-function 'agent-shell--create-bootstrapping-placeholders) #'ignore))
+         (agent-shell--render-pending-restore state))
+       (should (string-search "earlier output" (agent-shell-tool-output-tests--body state)))
+       (should (string-search "Renamed" (buffer-string)))
+       (should-not (map-nested-elt state '(:tool-calls "command" :output-chunks)))))))
 
 (ert-deftest agent-shell-tool-output-all-chunk-boundaries-test ()
   "Every partition of a short Unicode log yields the same literal preview."
