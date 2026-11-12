@@ -5662,14 +5662,15 @@ CHUNK is an alist like:
 
   ((:namespace-id . \"1\")
    (:block-id . \"1-agent_message_chunk\")
-   (:body . \"Hello world\")
+   (:body . (\"world\" \"Hello \"))
    (:create-new . t)
    (:above-last-prompt . nil))"
   (agent-shell--update-fragment
    :state state
    :namespace-id (map-elt chunk :namespace-id)
    :block-id (map-elt chunk :block-id)
-   :body (map-elt chunk :body)
+   :body (when-let* ((chunks (map-elt chunk :body)))
+           (apply #'concat (reverse chunks)))
    :append t
    :create-new (map-elt chunk :create-new)
    :navigation 'never
@@ -5694,7 +5695,7 @@ batched while `agent-shell--stream-render-interval' is non-nil.  A
 different fragment or CREATE-NEW flushes the previous batch first."
   (let ((chunk (list (cons :namespace-id namespace-id)
                      (cons :block-id block-id)
-                     (cons :body body)
+                     (cons :body (when body (list body)))
                      (cons :create-new create-new)
                      (cons :above-last-prompt above-last-prompt)))
         (pending (map-elt state :stream-render-pending)))
@@ -5705,7 +5706,8 @@ different fragment or CREATE-NEW flushes the previous batch first."
            (not create-new)
            (equal (map-elt pending :namespace-id) namespace-id)
            (equal (map-elt pending :block-id) block-id))
-      (map-put! pending :body (concat (map-elt pending :body) body)))
+      (when body
+        (map-put! pending :body (cons body (map-elt pending :body)))))
      (t
       (agent-shell--flush-stream-render state)
       (map-put! state :stream-render-pending chunk)

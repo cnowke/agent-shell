@@ -858,6 +858,33 @@ block -- covering the dispatch path, not just the helper in isolation."
         (should-not (plist-get (car rendered) :label-left))
         (should (= group-updates 2))))))
 
+(ert-deftest agent-shell--stream-render-shares-pending-chunks-test ()
+  "A burst retains each original string and assembles its batch on flush."
+  (with-temp-buffer
+    (let ((agent-shell--stream-render-interval 30)
+          (state (agent-shell--make-state :buffer (current-buffer)))
+          (first (propertize (make-string 1000000 ?x) 'face 'bold))
+          rendered)
+      (cl-letf (((symbol-function 'agent-shell--update-fragment)
+                 (lambda (&rest args) (setq rendered (plist-get args :body)))))
+        (agent-shell--update-streamed-fragment :state state :block-id "a" :body first)
+        (let ((chunks (map-nested-elt state '(:stream-render-pending :body))))
+          (should (eq (seq-first chunks) first))
+          (agent-shell--update-streamed-fragment :state state :block-id "a" :body "tail")
+          (should (eq (seq-rest (map-nested-elt state '(:stream-render-pending :body))) chunks)))
+        (should-not rendered)
+        (agent-shell--flush-stream-render state)
+        (should (equal rendered (concat first "tail")))
+        (should (eq (get-text-property 0 'face rendered) 'bold))
+        (should-not (map-elt state :stream-render-timer))
+        (agent-shell--update-streamed-fragment :state state :block-id "a")
+        (agent-shell--flush-stream-render state)
+        (should-not rendered)
+        (agent-shell--update-streamed-fragment :state state :block-id "a" :body "")
+        (agent-shell--update-streamed-fragment :state state :block-id "a")
+        (agent-shell--flush-stream-render state)
+        (should (equal rendered ""))))))
+
 (ert-deftest agent-shell--stream-render-flushes-on-fragment-change-test ()
   "Flush the previous batch when the fragment changes."
   (with-temp-buffer
