@@ -15,8 +15,9 @@
 (require 'agent-shell)
 (require 'agent-shell-chat-mode)
 (require 'profiler)
-(load (expand-file-name "agent-shell-tool-output-tests.el"
-                        (file-name-directory (or load-file-name buffer-file-name))) nil t)
+(unless (fboundp 'agent-shell-tool-output-tests--call-with-shell)
+  (load (expand-file-name "agent-shell-tool-output-tests.el"
+                          (file-name-directory (or load-file-name buffer-file-name))) nil t))
 
 (defun agent-shell-tool-output-benchmark--with-shells (count history function &optional states)
   "Call FUNCTION with COUNT isolated shells containing HISTORY prior turns.
