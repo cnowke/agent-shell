@@ -49,6 +49,33 @@
                       (agent-shell-markdown-convert (car case)))
                      (cadr case))))))
 
+(ert-deftest agent-shell-markdown-convert-emphasis-cjk-friendly ()
+  ;; Punctuation against a delimiter with CJK on the other side, which
+  ;; CommonMark leaves literal (markdown-cjk-friendly, issue #942).
+  (dolist (case '(("**가중치(Weights)**라고"
+                   (("가중치(Weights)" (agent-shell-markdown-bold)) ("라고" nil)))
+                  ("これは**「重要」**です"
+                   (("これは" nil) ("「重要」" (agent-shell-markdown-bold))
+                    ("です" nil)))
+                  ("这是**“重点”**内容"
+                   (("这是" nil) ("“重点”" (agent-shell-markdown-bold))
+                    ("内容" nil)))
+                  ("*가중치(Weights)*라고"
+                   (("가중치(Weights)" (agent-shell-markdown-italic))
+                    ("라고" nil)))))
+    (ert-info ((format "Markdown: %S" (car case)))
+      (should (equal (agent-shell-markdown--deconstruct
+                      (agent-shell-markdown-convert (car case)))
+                     (cadr case))))))
+
+(ert-deftest agent-shell-markdown-convert-emphasis-cjk-friendly-needs-cjk ()
+  ;; The same shapes without CJK stay CommonMark.
+  (dolist (source '("**weights(W)**tail" "**вес(W)**мир" "*weights(W)*tail"))
+    (ert-info ((format "Markdown: %S" source))
+      (should (equal (agent-shell-markdown--deconstruct
+                      (agent-shell-markdown-convert source))
+                     (list (list source nil)))))))
+
 (ert-deftest agent-shell-markdown-convert-bold-delimiter-boundaries ()
   (dolist (source '("word__literal__tail" "** leading**" "**trailing **"
                     "a**\"quoted\"**b" "**unclosed"))
@@ -3871,6 +3898,26 @@ returns (agent-shell-markdown-table agent-shell-markdown-table-zebra)."
                   (ensure-list (get-text-property (match-beginning 0)
                                                   'font-lock-face))))))
 
+(ert-deftest agent-shell-markdown-line-styling-keeps-markup-refontified-while-pending ()
+  ;; Bold styled while its line waits for the newline can be
+  ;; re-fontified before the blockquote or header styling lands on the
+  ;; whole line.  That styling must layer onto the bold, not replace it.
+  (dolist (chunks '(("> a **b** c" "\n")
+                    ("# a **b** c" "\n")))
+    (ert-info ((format "Chunks: %S" chunks))
+      (with-temp-buffer
+        (dolist (chunk chunks)
+          (goto-char (point-max))
+          (insert chunk)
+          (agent-shell-markdown-replace-markup)
+          ;; What re-fontification does to `face' between chunks.
+          (remove-text-properties (point-min) (point-max) '(face nil)))
+        (goto-char (point-min))
+        (search-forward "b ")
+        (should (memq 'agent-shell-markdown-bold
+                      (ensure-list (get-text-property (match-beginning 0)
+                                                      'font-lock-face))))))))
+
 (ert-deftest agent-shell-markdown-table-inside-open-fence-stays-raw ()
   ;; A table inside a fenced block whose closing fence hasn't
   ;; streamed in yet must NOT get table-rendered.  Otherwise the
@@ -4472,15 +4519,124 @@ A " nil)
                                 'face 'agent-shell-markdown-blockquote))))))
 
 (ert-deftest agent-shell-markdown-convert-blockquote-with-bold ()
-  ;; Inline markup inside a blockquote still renders — bold runs
-  ;; before blockquote, and the blockquote face composes on top so
-  ;; the bold text ends up with both faces.
+  ;; Inline markup inside a blockquote still renders.  The blockquote
+  ;; face goes beneath bold, so a theme whose blockquote face sets a
+  ;; regular weight cannot mask the bold.
   (should (equal (agent-shell-markdown--deconstruct
                   (agent-shell-markdown-convert "> hello **world**\n"))
                  '(("> hello " (agent-shell-markdown-blockquote))
-                   ("world" (agent-shell-markdown-blockquote
-                             agent-shell-markdown-bold))
+                   ("world" (agent-shell-markdown-bold
+                             agent-shell-markdown-blockquote))
                    ("\n" nil)))))
+
+(ert-deftest agent-shell-markdown-convert-blockquote-header ()
+  ;; A quoted header drops its `#' but keeps the `>' for the bar, and
+  ;; copies back as the original markdown.
+  (with-temp-buffer
+    (insert "> ## A **bold** title\n")
+    (agent-shell-markdown-replace-markup :force t)
+    (should (equal (agent-shell-markdown--deconstruct (buffer-string))
+                   '(("> " (agent-shell-markdown-blockquote))
+                     ("A " (agent-shell-markdown-header-2
+                            agent-shell-markdown-blockquote))
+                     ("bold" (agent-shell-markdown-header-2
+                              agent-shell-markdown-bold
+                              agent-shell-markdown-blockquote))
+                     (" title" (agent-shell-markdown-header-2
+                                agent-shell-markdown-blockquote))
+                     ("\n" nil))))
+    (should (get-text-property (point-min) 'display))
+    (should (equal (agent-shell-markdown-reconstruct (point-min) (point-max))
+                   "> ## A **bold** title\n"))))
+
+(ert-deftest agent-shell-markdown-convert-blockquote-divider ()
+  ;; A quoted divider draws the rule over `---' only, leaving the `>'
+  ;; to show as the quote's bar.
+  (let ((s (agent-shell-markdown-convert "> ---\n")))
+    (should (equal (substring-no-properties s) "> ---\n"))
+    (should (equal-including-properties
+             (get-text-property 0 'display s)
+             (propertize "▌" 'face 'agent-shell-markdown-blockquote)))
+    (should-not (get-text-property 1 'display s))
+    (should (equal-including-properties
+             (get-text-property 2 'display s)
+             (concat (propertize (make-string 12 ?\s) 'face '(:underline t))
+                     "\n")))
+    (should (eq (next-single-property-change 2 'display s) 5))))
+
+(ert-deftest agent-shell-markdown-convert-blockquote-source-block ()
+  ;; A fenced block inside a quote renders as a panel: the `>' markers
+  ;; leave the body and come back as bars in the panel's `line-prefix'.
+  (let* ((s (agent-shell-markdown-convert "> ```python\n> x = 1\n>     y = 2\n> ```\n"))
+         (body (string-search "x = 1" s)))
+    (should body)
+    (should (string-search "\n    y = 2" s))
+    (should-not (string-search "```" s))
+    (should (string-prefix-p "  ▌ " (get-text-property body 'line-prefix s)))
+    (should (get-text-property body 'agent-shell-markdown-frozen s))))
+
+(ert-deftest agent-shell-markdown-convert-nested-blockquote-source-block ()
+  ;; Each quote level gets its own bar.
+  (let* ((s (agent-shell-markdown-convert "> > ```sh\n> > ls\n> > ```\n"))
+         (body (string-search "ls" s)))
+    (should (string-prefix-p "  ▌ ▌ " (get-text-property body 'line-prefix s)))))
+
+(ert-deftest agent-shell-markdown-blockquote-source-block-gaps-keep-bars ()
+  ;; Framing gaps between the panel and the rest of its quote keep the
+  ;; bars, and copy back as bare `>' lines so the quote stays whole.
+  (with-temp-buffer
+    (insert "> Here:\n> ```sh\n> ls\n> ```\n> after\n")
+    (agent-shell-markdown-replace-markup :force t)
+    (goto-char (point-min))
+    (forward-line 1)
+    (should (looking-at-p "\n"))
+    (should (equal (substring-no-properties (get-text-property (point) 'line-prefix))
+                   "  ▌ "))
+    (should (equal (agent-shell-markdown-reconstruct (point-min) (point-max))
+                   "> Here:\n>\n> ```sh\n> ls\n> ```\n>\n> after\n"))))
+
+(ert-deftest agent-shell-markdown-blockquote-source-block-bare-quote-line-is-gap ()
+  ;; A bare `>' line already separating the panel from its quote
+  ;; counts as the gap, so no second one is inserted.
+  (let ((markdown "> Here:\n>\n> ```sh\n> ls\n> ```\n>\n> after\n"))
+    (with-temp-buffer
+      (insert markdown)
+      (agent-shell-markdown-replace-markup :force t)
+      (goto-char (point-min))
+      (forward-line 1)
+      (should (looking-at-p ">\n"))
+      (forward-line 1)
+      (should (get-text-property (point) 'agent-shell-markdown-source-block-rendered))
+      (should (equal (agent-shell-markdown-reconstruct (point-min) (point-max))
+                     markdown)))))
+
+(ert-deftest agent-shell-markdown-source-block-after-blockquote-has-no-bars ()
+  ;; A top-level fence right after a quote is outside it.
+  (let* ((s (agent-shell-markdown-convert "> quote\n```sh\nls\n```\n"))
+         (gap (1+ (string-search "\n" s))))
+    (should (eq (aref s gap) ?\n))
+    (should-not (get-text-property gap 'line-prefix s))
+    (should-not (string-search "▌" (get-text-property (string-search "ls" s)
+                                                      'line-prefix s)))))
+
+(ert-deftest agent-shell-markdown-blockquote-fence-inside-source-block-is-body ()
+  ;; A quoted fence inside a top-level block is body, and a closing
+  ;; fence at a different quote depth does not close a block.
+  (let ((s (agent-shell-markdown-convert "```markdown\n> ```sh\n> ls\n> ```\n```\n")))
+    (should (string-search "> ```sh\n> ls\n> ```" s)))
+  (let ((blocks (with-temp-buffer
+                  (insert "> ```sh\n> ls\n```\n")
+                  (agent-shell-markdown--source-blocks))))
+    (should (equal (length blocks) 1))
+    (should-not (map-elt (car blocks) :complete))))
+
+(ert-deftest agent-shell-markdown-source-blocks-strips-blockquote-markers-from-body ()
+  ;; External renderers get the code, not the quote markers.
+  (let ((block (car (with-temp-buffer
+                      (insert "> ```math\n> \\frac{a}{b}\n> ```\n")
+                      (agent-shell-markdown--source-blocks)))))
+    (should (equal (map-elt block :body) "\\frac{a}{b}"))
+    (should (equal (map-elt block :blockquote-depth) 1))))
 
 (ert-deftest agent-shell-markdown-blockquote-waits-for-newline-across-chunks ()
   ;; A blockquote line streamed across two chunks (`> hel' then `lo\n')
