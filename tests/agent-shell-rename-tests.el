@@ -4,8 +4,10 @@
 
 (require 'ert)
 (require 'agent-shell)
+(require 'acp-fakes)
 
 (defvar agent-shell-rename-tests--shells nil)
+(defvar agent-shell-rename-tests--steering-command #'agent-shell-submit-override)
 
 (defun agent-shell-rename-tests--shell (&optional start-function)
   "Create and track a shell without starting an ACP client.
@@ -116,6 +118,275 @@ When RENAME-AFTER-SUBMIT is non-nil, rename while the reply is pending."
       (agent-shell-rename-tests--steer
        (lambda () (rename-buffer " *raw-renamed-steering*" t))
        rename-after-submit))))
+
+(defun agent-shell-rename-tests--message (direction kind object)
+  "Make a recorded ACP message with DIRECTION, KIND, and OBJECT."
+  `((:direction . ,direction) (:kind . ,kind) (:object . ,object)))
+
+(defun agent-shell-rename-tests--chunk (text)
+  "Make a recorded agent response chunk containing TEXT."
+  (agent-shell-rename-tests--message
+   'incoming 'notification
+   `((method . "session/update")
+     (params (sessionId . "rename-acceptance")
+             (update (sessionUpdate . "agent_message_chunk")
+                     (content (type . "text") (text . ,text)))))))
+
+(defun agent-shell-rename-tests--barrier (method)
+  "Make a recorded barrier named METHOD to hold back incoming traffic."
+  (agent-shell-rename-tests--message 'outgoing 'notification `((method . ,method))))
+
+(defun agent-shell-rename-tests--traffic (action &optional resume)
+  "Record two turns with ACTION during the first, resuming when RESUME.
+ACTION is `steer', `cancel', or nil for an ordinary streamed response."
+  (append
+   (list
+    (agent-shell-rename-tests--message 'outgoing 'request '((id . 1) (method . "initialize")))
+    (agent-shell-rename-tests--message
+     'incoming 'response
+     '((id . 1) (result (protocolVersion . 1)
+                        (agentCapabilities (loadSession . t))
+                        (_meta (steering (supported . t))))))
+    (agent-shell-rename-tests--message
+     'outgoing 'request `((id . 2) (method . ,(if resume "session/load" "session/new"))))
+    (agent-shell-rename-tests--message
+     'incoming 'response '((id . 2) (result (sessionId . "rename-acceptance")))))
+   (list
+    (agent-shell-rename-tests--message 'outgoing 'request '((id . 10) (method . "session/prompt")))
+    (agent-shell-rename-tests--chunk "before rename; "))
+   (pcase action
+     ('steer
+      (list
+       (agent-shell-rename-tests--message 'outgoing 'request '((id . 11) (method . "_session/steering")))
+       (agent-shell-rename-tests--barrier "rename-test/steer-reply")
+       (agent-shell-rename-tests--message 'incoming 'response '((id . 11) (result (outcome . "injected"))))))
+     ('cancel
+      (list (agent-shell-rename-tests--barrier "session/cancel")))
+     (_ (list (agent-shell-rename-tests--barrier "rename-test/continue"))))
+   (unless (eq action 'cancel)
+     (list (agent-shell-rename-tests--chunk "after rename")
+           (agent-shell-rename-tests--barrier "rename-test/finish")))
+   (list
+    (agent-shell-rename-tests--message
+     'incoming 'response `((id . 10) (result (stopReason . ,(if (eq action 'cancel) "cancelled" "end_turn")))))
+    (agent-shell-rename-tests--message 'outgoing 'request '((id . 12) (method . "session/prompt")))
+    (agent-shell-rename-tests--barrier "rename-test/next-finish")
+    (agent-shell-rename-tests--chunk "next response")
+    (agent-shell-rename-tests--message 'incoming 'response '((id . 12) (result (stopReason . "end_turn")))))))
+
+(defun agent-shell-rename-tests--wait (predicate)
+  "Wait up to five seconds for PREDICATE, then assert it holds."
+  (let ((deadline (+ (float-time) 5)))
+    (while (and (not (funcall predicate)) (< (float-time) deadline))
+      (accept-process-output nil 0.01)
+      (sit-for 0))
+    (should (funcall predicate))))
+
+(defun agent-shell-rename-tests--client-shell (traffic-maker)
+  "Start a shell using TRAFFIC-MAKER as its fake agent server."
+  (let ((shell
+         (agent-shell--start
+          :config (agent-shell-make-agent-config
+                   :identifier 'rename-acceptance
+                   :buffer-name "Acceptance" :mode-line-name "Acceptance"
+                   :shell-prompt "Agent> " :shell-prompt-regexp "^Agent> "
+                   :client-maker
+                   (lambda (buffer)
+                     (unless (memq buffer agent-shell-rename-tests--shells)
+                       (push buffer agent-shell-rename-tests--shells))
+                     (let ((client (acp-fakes-make-client (funcall traffic-maker))))
+                       (map-put! client :context-buffer buffer)
+                       client)))
+          :session-strategy 'new :new-session t :no-focus t)))
+    (agent-shell-rename-tests--wait
+     (lambda () (map-elt (buffer-local-value 'agent-shell--state shell) :init-finished)))
+    shell))
+
+(defun agent-shell-rename-tests--advance (client method)
+  "Release CLIENT's recorded barrier, which must be named METHOD."
+  (should (equal method (map-nested-elt (acp-fakes-barrier client) '(:object method))))
+  (should (acp-fakes-skip-barrier client)))
+
+(defun agent-shell-rename-tests--submit (text &optional command)
+  "Type TEXT into the current shell and invoke COMMAND.
+COMMAND defaults to the public `agent-shell-submit' command."
+  (goto-char (point-max))
+  (insert text)
+  (call-interactively (or command #'agent-shell-submit)))
+
+(defun agent-shell-rename-tests--assert-request (client id text)
+  "Check CLIENT's pending request ID contains TEXT for the right shell."
+  (let ((pending (map-nested-elt client `(:pending-requests ,id))))
+    (should (eq (current-buffer) (map-elt pending :buffer)))
+    (should (equal "rename-acceptance"
+                   (map-nested-elt pending '(:request :params sessionId))))
+    (should (equal (vector `((type . "text") (text . ,text)))
+                   (map-nested-elt pending '(:request :params prompt))))))
+
+(defun agent-shell-rename-tests--next-turn (client &optional command)
+  "Submit and finish another turn through CLIENT after the rename.
+Use COMMAND to submit, defaulting to `agent-shell-submit'."
+  (should-not (shell-maker-busy))
+  (agent-shell-rename-tests--submit "next prompt" command)
+  (agent-shell-rename-tests--assert-request client 12 "next prompt")
+  (agent-shell-rename-tests--advance client "rename-test/next-finish")
+  (agent-shell-rename-tests--wait
+   (lambda () (and (not (shell-maker-busy))
+                   (string-match-p "next response" (buffer-string)))))
+  (should (acp-fakes-exhausted-p client))
+  (should-not (map-elt client :pending-requests))
+  (should-not (map-elt agent-shell--state :active-requests))
+  (should (agent-shell--prompt-input-start))
+  (should (string-match-p "next response" (buffer-string))))
+
+(ert-deftest agent-shell-rename-acceptance-submit-stream-test ()
+  "Submission, streaming, and another turn survive idle and busy renames."
+  (skip-unless (fboundp 'shell-maker--sync-buffer-name))
+  (agent-shell-rename-tests--with-shells 0
+    (with-current-buffer (agent-shell-rename-tests--client-shell
+                          (lambda () (agent-shell-rename-tests--traffic nil)))
+      (let ((client (map-elt agent-shell--state :client))
+            (process (shell-maker--process)))
+        (agent-shell-rename-buffer :name " *acceptance-idle*")
+        (agent-shell-rename-tests--submit "hello")
+        (should (shell-maker-busy))
+        (agent-shell-rename-tests--assert-request client 10 "hello")
+        (agent-shell-rename-tests--wait
+         (lambda () (string-match-p "before rename; " (buffer-string))))
+        (rename-buffer " *acceptance-streaming*" t)
+        (goto-char (point-max))
+        (insert "draft during streaming")
+        (agent-shell-rename-tests--advance client "rename-test/continue")
+        (agent-shell-rename-tests--wait
+         (lambda () (string-match-p "before rename; after rename" (buffer-string))))
+        (agent-shell-rename-tests--advance client "rename-test/finish")
+        (should (equal "draft during streaming" (agent-shell--prompt-input)))
+        (should (eq process (shell-maker--process)))
+        (agent-shell--clear-prompt-input)
+        (agent-shell-rename-tests--next-turn client)))))
+
+(ert-deftest agent-shell-rename-acceptance-steering-test ()
+  "C-<return> steers correctly before and across an in-flight rename."
+  (skip-unless (fboundp 'shell-maker--sync-buffer-name))
+  (dolist (rename-after-submit '(nil t))
+    (ert-info ((format "Rename after steering submission: %s" rename-after-submit))
+      (let ((agent-shell-mode-map (copy-keymap agent-shell-mode-map)))
+        (define-key agent-shell-mode-map (kbd "C-<return>")
+                    agent-shell-rename-tests--steering-command)
+        (agent-shell-rename-tests--with-shells 0
+          (let* ((shell (agent-shell-rename-tests--client-shell
+                         (lambda () (agent-shell-rename-tests--traffic 'steer))))
+                 (other (agent-shell-rename-tests--client-shell
+                         (lambda () (agent-shell-rename-tests--traffic nil))))
+                 (old-name (buffer-name shell))
+                 (other-text (with-current-buffer other (buffer-string))))
+            (with-current-buffer shell
+              (let ((client (map-elt agent-shell--state :client))
+                    (process (shell-maker--process)))
+                (agent-shell-rename-tests--submit "hello")
+                (unless rename-after-submit (rename-buffer " *acceptance-steer*" t))
+                (goto-char (point-max))
+                (insert "change direction")
+                (call-interactively (key-binding (kbd "C-<return>")))
+                (agent-shell-rename-tests--assert-request client 11 "change direction")
+                (should-not (agent-shell--prompt-input))
+                (when rename-after-submit (rename-buffer " *acceptance-steer*" t))
+                (shell-maker-set-buffer-name other old-name)
+                (goto-char (point-max))
+                (insert "next draft")
+                (agent-shell-rename-tests--advance client "rename-test/steer-reply")
+                (should (string-match-p (regexp-quote "[steer] change direction") (buffer-string)))
+                (should (equal "next draft" (agent-shell--prompt-input)))
+                (agent-shell-rename-tests--advance client "rename-test/finish")
+                (should (eq process (shell-maker--process)))
+                (should (equal "next draft" (agent-shell--prompt-input)))
+                (agent-shell--clear-prompt-input)
+                (agent-shell-rename-tests--next-turn client (key-binding (kbd "C-<return>")))))
+            (should (equal other-text (with-current-buffer other (buffer-string))))
+            (should-not (map-elt (map-elt (buffer-local-value 'agent-shell--state other) :client)
+                                 :pending-requests))))))))
+
+(ert-deftest agent-shell-rename-acceptance-viewport-test ()
+  "Renamed viewports retain drafts and queue into their associated shell."
+  (skip-unless (fboundp 'shell-maker--sync-buffer-name))
+  (agent-shell-rename-tests--with-shells 0
+    (let* ((shell (agent-shell-rename-tests--client-shell
+                   (lambda () (agent-shell-rename-tests--traffic nil))))
+           (viewport (agent-shell-viewport--buffer :shell-buffer shell))
+           (client (map-elt (buffer-local-value 'agent-shell--state shell) :client)))
+      (with-current-buffer viewport (insert "queued from viewport"))
+      (with-current-buffer shell
+        (agent-shell-rename-tests--submit "hello")
+        (rename-buffer " *acceptance-viewport-shell*" t))
+      (with-current-buffer viewport
+        (rename-buffer " *acceptance-independent-viewport*" t)
+        (should (equal "queued from viewport" (buffer-string)))
+        (should (eq shell (agent-shell--current-shell)))
+        (agent-shell-viewport-compose-send t)
+        (should (string-empty-p (string-trim (buffer-string)))))
+      (with-current-buffer shell
+        (should (equal '("queued from viewport") (map-elt agent-shell--state :pending-prompts)))
+        (goto-char (point-max))
+        (insert "shell draft")
+        (agent-shell-rename-tests--advance client "rename-test/continue")
+        (agent-shell-rename-tests--advance client "rename-test/finish")
+        (agent-shell-rename-tests--wait
+         (lambda () (map-nested-elt client '(:pending-requests 12))))
+        (agent-shell-rename-tests--assert-request client 12 "queued from viewport")
+        (should (equal "shell draft" (agent-shell--prompt-input)))
+        (agent-shell-rename-tests--advance client "rename-test/next-finish")
+        (should (acp-fakes-exhausted-p client))
+        (should-not (shell-maker-busy))
+        (should (equal "shell draft" (agent-shell--prompt-input))))
+      (should (eq viewport (agent-shell-viewport--buffer :shell-buffer shell))))))
+
+(ert-deftest agent-shell-rename-acceptance-interrupt-test ()
+  "Interrupting a renamed shell finishes the turn and permits another."
+  (skip-unless (fboundp 'shell-maker--sync-buffer-name))
+  (agent-shell-rename-tests--with-shells 0
+    (with-current-buffer (agent-shell-rename-tests--client-shell
+                          (lambda () (agent-shell-rename-tests--traffic 'cancel)))
+      (let ((client (map-elt agent-shell--state :client))
+            (process (shell-maker--process))
+            (agent-shell-confirm-interrupt nil))
+        (agent-shell-rename-tests--submit "hello")
+        (rename-buffer " *acceptance-interrupt*" t)
+        (call-interactively #'agent-shell-interrupt)
+        (agent-shell-rename-tests--wait (lambda () (not (shell-maker-busy))))
+        (should-not (map-elt agent-shell--state :active-requests))
+        (should (eq process (shell-maker--process)))
+        (agent-shell-rename-tests--next-turn client)))))
+
+(ert-deftest agent-shell-rename-acceptance-restart-reload-test ()
+  "Actual restart and reload retain a renamed shell's name and usability."
+  (dolist (operation '(agent-shell-restart agent-shell-reload))
+    (agent-shell-rename-tests--with-shells 0
+      (let* ((resume nil)
+             (shell (agent-shell-rename-tests--client-shell
+                     (lambda () (agent-shell-rename-tests--traffic nil resume))))
+             (process (get-buffer-process shell))
+             (client (map-elt (buffer-local-value 'agent-shell--state shell) :client))
+             (viewport (agent-shell-viewport--buffer :shell-buffer shell))
+             (name nil))
+        (with-current-buffer shell
+          (agent-shell-rename-buffer :name " *acceptance-restart*")
+          (setq name (buffer-name))
+          (setq resume (eq operation 'agent-shell-reload))
+          (save-window-excursion (call-interactively operation)))
+        (let ((replacement (get-buffer name)))
+          (should (buffer-live-p replacement))
+          (should-not (buffer-live-p shell))
+          (should-not (buffer-live-p viewport))
+          (should-not (process-live-p process))
+          (should-not (process-live-p (map-elt client :process)))
+          (agent-shell-rename-tests--wait
+           (lambda () (map-elt (buffer-local-value 'agent-shell--state replacement) :init-finished)))
+          (with-current-buffer replacement
+            (should (equal "rename-acceptance" (map-nested-elt agent-shell--state '(:session :id))))
+            (agent-shell-rename-tests--submit "hello")
+            (agent-shell-rename-tests--advance (map-elt agent-shell--state :client) "rename-test/continue")
+            (agent-shell-rename-tests--advance (map-elt agent-shell--state :client) "rename-test/finish")
+            (agent-shell-rename-tests--next-turn (map-elt agent-shell--state :client))))))))
 
 (ert-deftest agent-shell-rename-preserves-custom-binding-test ()
   "Starting another shell preserves a customized rename command binding."

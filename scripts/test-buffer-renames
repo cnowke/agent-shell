@@ -1,0 +1,42 @@
+#!/bin/sh
+set -eu
+
+acceptance_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+acceptance_shell_maker="$acceptance_root/../shell-maker"
+acceptance_acp=""
+acceptance_init=""
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --shell-maker|--acp|--init)
+            if [ "$#" -lt 2 ]; then
+                echo "Missing value for $1" >&2
+                exit 2
+            fi
+            case "$1" in
+                --shell-maker) acceptance_shell_maker=$2 ;;
+                --acp) acceptance_acp=$2 ;;
+                --init) acceptance_init=$2 ;;
+            esac
+            shift 2
+            ;;
+        --help)
+            echo "Usage: $0 [--shell-maker CHECKOUT] [--acp DIRECTORY] [--init FILE]"
+            echo "Runs isolated batch tests; --init reads only the C-<return> binding and its defun."
+            exit 0
+            ;;
+        *)
+            echo "Unknown argument: $1" >&2
+            exit 2
+            ;;
+    esac
+done
+
+export AGENT_SHELL_RENAME_ROOT="$acceptance_root"
+export AGENT_SHELL_RENAME_SHELL_MAKER="$acceptance_shell_maker"
+export AGENT_SHELL_RENAME_ACP="$acceptance_acp"
+export AGENT_SHELL_RENAME_INIT="$acceptance_init"
+
+exec "${EMACS_BIN:-emacs}" -Q --batch \
+    --load "$acceptance_root/scripts/agent-shell-rename-acceptance.el" \
+    --funcall agent-shell-rename-acceptance-run

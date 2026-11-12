@@ -1,0 +1,37 @@
+name: Buffer rename acceptance
+
+on:
+  workflow_dispatch:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  paired-checkouts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: agent-shell
+
+      - uses: actions/checkout@v4
+        with:
+          repository: cnowke/shell-maker
+          ref: e5e5382d64c98efc8b66afe0b519a9b36cee52bc
+          path: shell-maker
+
+      - uses: actions/checkout@v4
+        with:
+          repository: xenodium/acp.el
+          ref: 2959da5fa8657da17a78ac6ceef303a50e3e69de
+          path: acp
+
+      - uses: purcell/setup-emacs@master
+        with:
+          version: '29.1'
+
+      - name: Run required rename workflows without skips
+        run: agent-shell/scripts/test-buffer-renames --acp "$GITHUB_WORKSPACE/acp"

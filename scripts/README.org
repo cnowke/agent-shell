@@ -1,0 +1,65 @@
+* Buffer rename acceptance
+
+From the agent-shell checkout, run:
+
+#+begin_src sh
+./scripts/test-buffer-renames --init ../emacs/init.el
+#+end_src
+
+This starts a separate =emacs -Q --batch= process.  It loads this checkout
+and the sibling =../shell-maker= checkout, prints their revisions and
+loaded library paths, and runs all rename tests from both repositories.
+Any failed or skipped test makes the command fail.  Missing required
+workflow tests also make it fail.
+
+=--init= reads only the agent-shell =C-<return>= binding and its command's
+=defun= from that file.  The command is invoked in the isolated test
+process; the rest of the init file is never evaluated.  Without =--init=,
+the tests bind =C-<return>= to =agent-shell-submit-override= and report that
+they used the fixture binding.
+
+Use =--shell-maker /path/to/checkout= to select the companion checkout.
+Use =--acp /path/to/acp= to select an ACP source directory; otherwise the
+installed package supplies ACP.  =EMACS_BIN= selects the Emacs executable.
+The runner does not download dependencies or start a real agent.
+
+** Required workflows
+
+- Submit after an idle rename, rename while output streams, preserve the
+  shell draft, and submit another turn.
+- Steer through =C-<return>= after a rename and while the steering reply
+  is pending.  Reuse the old name for another live shell and verify its
+  contents and requests remain untouched.
+- Rename the shell and viewport, preserve the viewport draft, queue it
+  into its associated shell, and preserve a separate shell draft while
+  the queue drains.
+- Interrupt a renamed shell and submit another turn.
+- Actually restart and reload a renamed shell, check old processes and
+  viewports close, and submit through the replacement session.
+
+These tests use ACP's fake server with the real request resolver and
+notification handlers.  Shell lookup, submission, steering, rendering,
+interrupt, restart, and reload run through their production functions.
+Recorded barriers hold replies until the test releases them; waits check
+observable state with a deadline rather than assuming immediate rendering.
+
+** CI
+
+=buffer-renames.yml= runs the same command on Emacs 29.1 with the companion
+shell-maker fix pinned to =e5e5382d64c98efc8b66afe0b519a9b36cee52bc= and ACP
+pinned to =2959da5fa8657da17a78ac6ceef303a50e3e69de=.  This job requires
+zero skips.  The existing test workflow continues to check compatibility
+with upstream dependencies, where tests needing the companion fix may skip.
+
+** Checking an existing Emacs session
+
+Load =scripts/agent-shell-rename-runtime.el= manually, then run
+=M-x agent-shell-rename-runtime-report= from the affected shell.  The report
+shows loaded library paths, checkout revisions on disk, the current key
+binding, name synchronization, installed rename hook, buffer ownership,
+and process status.  It neither loads agent packages nor changes shell state.
+
+Checkout paths and revisions describe the files on disk.  Definitions
+already loaded into Emacs can predate those files.  A successful isolated
+acceptance run therefore does not establish that an existing Emacs session
+has loaded the fixes.  Check its report before claiming they are active.
