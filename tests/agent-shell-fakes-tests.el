@@ -3,7 +3,11 @@
 ;;; Code:
 
 (require 'ert)
-(require 'agent-shell-fakes)
+(require 'agent-shell-fakes
+         (expand-file-name "agent-shell-fakes.el"
+                           (file-name-directory
+                            (or (bound-and-true-p byte-compile-current-file)
+                                load-file-name buffer-file-name))))
 
 (ert-deftest agent-shell-fakes-synthetic-exchange-resolves-request-test ()
   "A generated exchange resolves a fake client's request with its result."
