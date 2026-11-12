@@ -50,6 +50,73 @@ Use START-FUNCTION to select the shell startup function."
                (kill-buffer buffer)))))
        (delete-directory directory t))))
 
+(defun agent-shell-rename-tests--steer (rename-function rename-after-submit)
+  "Steer through a rename using RENAME-FUNCTION.
+When RENAME-AFTER-SUBMIT is non-nil, rename while the reply is pending."
+  (agent-shell-rename-tests--with-shells 1
+    (let* ((shell (car agent-shell-rename-tests--shells))
+           (original-name (buffer-name shell))
+           (process (get-buffer-process shell))
+           (request nil)
+           (unrelated nil)
+           (agent-shell-persistent-prompt-enabled t)
+           (agent-shell-busy-submit-override-function #'agent-shell-prompt-steer))
+      (unwind-protect
+          (with-current-buffer shell
+            (map-put! (map-elt agent-shell--state :session) :id "rename-steering-session")
+            (map-put! agent-shell--state :supports-steering t)
+            (setq shell-maker--busy t)
+            (unless rename-after-submit
+              (funcall rename-function))
+            (goto-char (point-max))
+            (insert "change direction")
+            (cl-letf (((symbol-function 'acp-send-request)
+                       (lambda (&rest arguments)
+                         (setq request arguments))))
+              (call-interactively #'agent-shell-submit-override))
+            (should (equal "_session/steering"
+                           (map-elt (plist-get request :request) :method)))
+            (should (equal "rename-steering-session"
+                           (map-nested-elt (plist-get request :request) '(:params sessionId))))
+            (should (equal [((type . "text") (text . "change direction"))]
+                           (map-nested-elt (plist-get request :request) '(:params prompt))))
+            (should (eq shell (plist-get request :buffer)))
+            (should-not (agent-shell--prompt-input))
+            (when rename-after-submit
+              (funcall rename-function))
+            (setq unrelated (get-buffer-create original-name))
+            (with-current-buffer unrelated (insert "unrelated contents"))
+            (goto-char (point-max))
+            (insert "next draft")
+            (with-current-buffer (plist-get request :buffer)
+              (funcall (plist-get request :on-success) '((outcome . "injected"))))
+            (should (string-match-p (regexp-quote "[steer] change direction")
+                                    (buffer-string)))
+            (should (equal "next draft" (agent-shell--prompt-input)))
+            (should (eq process (shell-maker--process)))
+            (should (process-live-p process))
+            (should (equal "unrelated contents"
+                           (with-current-buffer unrelated (buffer-string)))))
+        (when (buffer-live-p unrelated)
+          (kill-buffer unrelated))))))
+
+(ert-deftest agent-shell-rename-steering-test ()
+  "Steering and pending replies survive the supported rename command."
+  (dolist (rename-after-submit '(nil t))
+    (ert-info ((format "Rename after submission: %s" rename-after-submit))
+      (agent-shell-rename-tests--steer
+       (lambda () (agent-shell-rename-buffer :name " *renamed-steering*"))
+       rename-after-submit))))
+
+(ert-deftest agent-shell-rename-raw-steering-test ()
+  "Steering survives raw renames when shell-maker supports them."
+  (skip-unless (fboundp 'shell-maker--sync-buffer-name))
+  (dolist (rename-after-submit '(nil t))
+    (ert-info ((format "Rename after submission: %s" rename-after-submit))
+      (agent-shell-rename-tests--steer
+       (lambda () (rename-buffer " *raw-renamed-steering*" t))
+       rename-after-submit))))
+
 (ert-deftest agent-shell-rename-preserves-custom-binding-test ()
   "Starting another shell preserves a customized rename command binding."
   (let ((agent-shell-mode-map (copy-keymap agent-shell-mode-map)))
