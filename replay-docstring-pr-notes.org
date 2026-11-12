@@ -1,0 +1,68 @@
+#+title: Replay docstring fix: personal PR notes
+
+* TODO Keep this file out of the upstream PR
+
+Reminder to myself: do not include this file in the upstream PR.  Keep it
+only on my fork.  Omit the separate commit that adds these notes when
+preparing the upstream PR branch.  The contribution should contain only
+the docstring fix and its regression tests.
+
+* Problem
+
+=agent-shell-fakes--synth-exchange= contains unescaped double quotes in
+its docstring examples.  These terminate the docstring early, causing
+=session/new= to be evaluated as a variable when the helper runs.  This
+breaks replay of partial captures that require a synthetic initialization
+handshake.
+
+* Reproduce on upstream main
+
+Verified against upstream =xenodium/agent-shell= main at
+=ac74bf14ec6d0a68daf54f0f30359534f52d1a78=.
+
+From the repository root, with =acp.el= installed, run:
+
+#+begin_src sh
+emacs -Q --batch \
+  --eval '(progn (require (quote package)) (package-initialize))' \
+  --load tests/agent-shell-fakes.el \
+  --eval '(prin1 (agent-shell-fakes--synth-exchange
+                  7 "session/new" nil
+                  (quote ((sessionId . "s1")))))'
+#+end_src
+
+On the upstream revision above, this fails with:
+
+#+begin_example
+(void-variable session/new)
+#+end_example
+
+After applying the docstring quoting fix, the same command returns the
+synthetic request/response pair successfully and exits with status 0.
+
+This reproduction starts a separate batch Emacs process.  It does not
+connect to the running Emacs session or start a real agent.
+
+* Fix and validation
+
+Escape the double quotes in the docstring examples so the examples remain
+inside the docstring.
+
+The regression tests cover:
+
+- A synthetic exchange resolving a request through the ACP fake client.
+- Initialization-handshake generation for a partial capture.
+
+Both tests fail before the fix with =void-variable session/new= and pass
+afterward.
+
+To run them from the fixed branch, with =acp.el= installed:
+
+#+begin_src sh
+emacs -Q --batch \
+  --eval '(progn (require (quote package)) (package-initialize))' \
+  --load tests/agent-shell-fakes-tests.el \
+  --eval '(ert-run-tests-batch-and-exit "^agent-shell-fakes-")'
+#+end_src
+
+Expected result: =Ran 2 tests, 2 results as expected, 0 unexpected=.
