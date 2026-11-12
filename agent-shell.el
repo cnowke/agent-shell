@@ -1357,6 +1357,7 @@ OUTGOING-REQUEST-DECORATOR (passed through to `acp-make-client')."
         (cons :expanded-activity-group nil)
         (cons :request-count 0)
         (cons :last-activity-time nil)
+        ;; Tool calls retain shared :output-chunks while a preview is streaming.
         (cons :tool-calls nil)
         (cons :elicitations nil)
         (cons :available-commands nil)
