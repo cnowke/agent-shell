@@ -31,6 +31,7 @@
 (require 'acp)
 (require 'map)
 (require 'seq)
+(require 'agent-shell-tool-output)
 
 (declare-function agent-shell--indent-string "agent-shell")
 (declare-function agent-shell-welcome-message "agent-shell")
@@ -39,6 +40,7 @@
 (autoload 'agent-shell-make-agent-config "agent-shell")
 (declare-function agent-shell--dwim "agent-shell")
 (declare-function agent-shell--tool-call-update-output-markdown "agent-shell")
+(declare-function agent-shell--state "agent-shell")
 (declare-function agent-shell-subscribe-to "agent-shell")
 (declare-function agent-shell-unsubscribe "agent-shell")
 
@@ -171,7 +173,9 @@ authenticate request shape (see its \"DEFAULT_AUTH_REQUEST\")."
           '((methodId . "chat-gpt"))))))
 
 (defvar-local agent-shell-openai--terminal-output-snapshots nil
-  "Alist of Codex tool-call IDs and accumulated output in the current buffer.")
+  "Alist of Codex tool-call IDs and terminal output state.
+Each entry holds reversed `:chunks', their `:length', and whether the
+last rendered output was an incremental `:streaming' preview.")
 
 (defun agent-shell-openai--subscribe-output-cleanup ()
   "Clear Codex output snapshots when the current turn or session ends."
@@ -181,17 +185,23 @@ authenticate request shape (see its \"DEFAULT_AUTH_REQUEST\")."
            :shell-buffer (current-buffer)
            :on-event (lambda (event)
                        (when (seq-contains-p '(turn-complete session-restored session-selected
-                                                            init-session error clean-up)
+                                                             init-session error clean-up)
                                              (map-elt event :event))
+                         (when (memq (map-elt event :event) '(turn-complete error clean-up))
+                           (agent-shell--tool-output-finalize
+                            (agent-shell--state) agent-shell-openai--terminal-output-snapshots))
                          (setq agent-shell-openai--terminal-output-snapshots nil)
                          (agent-shell-unsubscribe :subscription subscription)))))))
 
 (cl-defun agent-shell-openai--notification-adapter (&key acp-notification)
-  "Adapt Codex terminal output in ACP-NOTIFICATION to standard ACP content.
+  "Normalize Codex terminal output in ACP-NOTIFICATION for rendering.
 
-Accumulate `_meta.terminal_output_delta.data' by tool-call ID in the
-current buffer.  For example, deltas \"hello\\n\" and \"world\\n\" become a
-text content block containing \"```\\nhello\\nworld\\n```\".
+Retain `_meta.terminal_output_delta.data' as reversed chunks by tool-call
+ID.  Normalized updates carry `:output-chunks' and, for streamed data,
+`:output-delta', `:output-length', and `:output-append'.  The core handler
+appends a bounded live preview and assembles the complete output once on
+completion.  For example, \"hello\\n\" and \"world\\n\" retain the chunks
+\='(\"world\\n\" \"hello\\n\") without copying earlier output.
 
 Only tool calls that stream deltas are tracked.  Once tracked, complete
 content or `rawOutput.formatted_output' snapshots replace the accumulated
@@ -207,26 +217,33 @@ Return ACP-NOTIFICATION after adaptation."
               ((stringp tool-call-id))
               ((or (stringp (map-nested-elt update '(_meta terminal_output_delta data)))
                    (map-elt agent-shell-openai--terminal-output-snapshots tool-call-id)))
-              (snapshot (agent-shell--tool-call-update-output-markdown update))
-              (output (cond
-                       ((or (not (string-empty-p snapshot))
-                            (stringp (map-nested-elt update '(rawOutput formatted_output))))
-                        snapshot)
-                       ((stringp (map-nested-elt update '(_meta terminal_output_delta data)))
-                        (concat (map-elt agent-shell-openai--terminal-output-snapshots tool-call-id)
-                                (map-nested-elt update '(_meta terminal_output_delta data))))
-                       (t (map-elt agent-shell-openai--terminal-output-snapshots tool-call-id)))))
-    (unless agent-shell-openai--terminal-output-snapshots
-      (agent-shell-openai--subscribe-output-cleanup))
-    (setf (map-elt agent-shell-openai--terminal-output-snapshots tool-call-id) output)
-    (when-let* (((not (equal output snapshot)))
-                (text (string-trim-right output "\n+"))
-                ((not (string-empty-p text))))
-      (setf (alist-get 'content (alist-get 'update (alist-get 'params acp-notification)))
-            (append (map-elt update 'content)
-                    (list `((type . "content")
-                            (content (type . "text")
-                                     (text . ,(format "```\n%s\n```" text)))))))))
+              (snapshot (agent-shell--tool-call-update-output-markdown update)))
+    (let* ((delta (map-nested-elt update '(_meta terminal_output_delta data)))
+           (previous (map-elt agent-shell-openai--terminal-output-snapshots tool-call-id))
+           (replacement (or (not (string-empty-p snapshot))
+                            (stringp (map-nested-elt update '(rawOutput formatted_output)))))
+           (chunks (cond (replacement (list snapshot))
+                         ((stringp delta) (cons delta (map-elt previous :chunks)))
+                         (t (map-elt previous :chunks))))
+           (size (cond (replacement (length snapshot))
+                       ((stringp delta) (+ (map-elt previous :length 0) (length delta)))
+                       (t (map-elt previous :length 0)))))
+      (unless agent-shell-openai--terminal-output-snapshots
+	(agent-shell-openai--subscribe-output-cleanup))
+      (setf (map-elt update :output-chunks) chunks
+            (map-elt update :output-length) size
+            (map-elt update :output-append) (map-elt previous :streaming))
+      (cond (replacement)
+            ((stringp delta) (setf (map-elt update :output-delta) delta))
+            (t (setf (map-elt update :output-unchanged) t)))
+      (setf (map-elt agent-shell-openai--terminal-output-snapshots tool-call-id)
+            (list (cons :chunks chunks)
+                  (cons :length size)
+                  (cons :streaming
+			(and (not replacement)
+                             (or (stringp delta) (map-elt previous :streaming))
+                             (not (member (map-elt update 'status) '("completed" "failed")))))))
+      (setf (alist-get 'update (alist-get 'params acp-notification)) update)))
   acp-notification)
 
 (defun agent-shell-openai-make-codex-config ()

@@ -100,6 +100,7 @@
 (require 'agent-shell-qoder)
 (require 'agent-shell-qwen)
 (require 'agent-shell-styles)
+(require 'agent-shell-tool-output)
 (require 'agent-shell-usage)
 (require 'agent-shell-worktree)
 (require 'agent-shell-ui)
@@ -3773,36 +3774,41 @@ Clears STATE's `:expanded-activity-group'."
             :data (list (cons :tool-call-id (map-nested-elt acp-notification '(params update toolCallId)))
                         (cons :tool-call (map-nested-elt state `(:tool-calls ,(map-nested-elt acp-notification '(params update toolCallId)))))
                         (cons :meta (map-nested-elt acp-notification '(params update _meta)))))
-           (let* ((diffs (map-nested-elt state `(:tool-calls ,(map-nested-elt acp-notification '(params update toolCallId)) :diffs)))
-                  (output (concat
-                           "\n\n"
-                           (agent-shell--tool-call-update-output-markdown
-                            (map-nested-elt acp-notification '(params update)))
-                           "\n\n"))
+           (let* ((update (map-nested-elt acp-notification '(params update)))
+                  (streaming (and (map-elt update :output-chunks)
+                                  (not (member (map-elt update 'status) '("completed" "failed")))
+                                  (or (stringp (map-elt update :output-delta))
+                                      (map-elt update :output-unchanged))))
+                  (diffs (map-nested-elt state `(:tool-calls ,(map-elt update 'toolCallId) :diffs)))
+                  (output (unless streaming
+                            (concat "\n\n"
+                                    (agent-shell--tool-call-update-output-markdown update)
+                                    "\n\n")))
                   (diff-text (agent-shell--format-diffs-as-text diffs))
-                  (body-text (agent-shell--truncate-tool-output-lines
-                              (if diff-text
-                                  (concat output "\n\n" diff-text)
-                                output)))
+                  (full-body (unless streaming
+                               (if diff-text (concat output "\n\n" diff-text) output)))
+                  (body-text (if streaming
+                                 (agent-shell--tool-output-preview update)
+                               (agent-shell--truncate-tool-output-lines full-body)))
                   ;; Whether this update introduces a new tool call rather than
                   ;; editing an earlier one in place.  Captured before the
                   ;; group-id helper assigns a group, so an in-place update
                   ;; does not look new.
                   (tool-newly-grouped
                    (not (map-nested-elt state `(:tool-calls ,(map-nested-elt acp-notification '(params update toolCallId)) :group-id)))))
-             ;; Log tool call to transcript when completed or failed
-             (when (and (map-nested-elt acp-notification '(params update status))
-                        (member (map-nested-elt acp-notification '(params update status)) '("completed" "failed")))
+             ;; Save complete output when a tool or its turn finishes.
+             (when (or (member (map-elt update 'status) '("completed" "failed"))
+                       (map-elt update :output-final))
                (agent-shell--append-transcript
                 :text (agent-shell--make-transcript-tool-call-entry
-                       :status (map-nested-elt acp-notification '(params update status))
+                       :status (map-nested-elt state `(:tool-calls ,(map-elt update 'toolCallId) :status))
                        :title (map-nested-elt state `(:tool-calls ,(map-nested-elt acp-notification '(params update toolCallId)) :title))
                        :kind (map-nested-elt state `(:tool-calls ,(map-nested-elt acp-notification '(params update toolCallId)) :kind))
                        :description (map-nested-elt state `(:tool-calls ,(map-nested-elt acp-notification '(params update toolCallId)) :description))
                        :command (map-nested-elt state `(:tool-calls ,(map-nested-elt acp-notification '(params update toolCallId)) :command))
                        :parameters (agent-shell--extract-tool-parameters
                                     (map-nested-elt state `(:tool-calls ,(map-nested-elt acp-notification '(params update toolCallId)) :raw-input)))
-                       :output body-text)
+                       :output (if (map-elt update :output-chunks) full-body body-text))
                 :file-path agent-shell--transcript-file))
              ;; Hide permission after sending response.
              ;; Status is completed or failed so the user
@@ -3840,7 +3846,9 @@ Clears STATE's `:expanded-activity-group'."
                                             (not (agent-shell-elicitation--questionnaire-p
                                                   saved-input)))
                                    (agent-shell--format-tool-call-input saved-input))))
-               (agent-shell--update-fragment
+               (funcall (if streaming
+                            #'agent-shell--update-streamed-fragment
+                          #'agent-shell--update-fragment)
                 :state state
                 :block-id (map-nested-elt acp-notification '(params update toolCallId))
                 :label-left (map-elt tool-call-labels :status)
@@ -3849,6 +3857,7 @@ Clears STATE's `:expanded-activity-group'."
                 :group-label agent-shell--activity-group-label
                 :group-expanded (agent-shell--activity-group-initial-expanded-p)
                 :body (cond
+                       (streaming body-text)
                        ;; A form is showing these questions interactively
                        ;; just below, so repeating them here would ask twice.
                        ((agent-shell-elicitation--pending-for-tool-call-p
@@ -3860,10 +3869,14 @@ Clears STATE's `:expanded-activity-group'."
                         (concat input-block "\n\n" (string-trim body-text)))
                        (t
                         (string-trim body-text)))
+                :append (and streaming (or (map-elt update :output-append)
+                                          (map-elt update :output-unchanged)))
+                :render-body (not streaming)
                 :expanded agent-shell-tool-use-expand-by-default
                 :above-last-prompt (not (agent-shell--active-requests-p state)))
-               (agent-shell--refresh-activity-group-header state group-id)
-               (agent-shell--sync-activity-group-fold :state state :group-id group-id))
+               (unless streaming
+                 (agent-shell--refresh-activity-group-header state group-id)
+                 (agent-shell--sync-activity-group-fold :state state :group-id group-id)))
              ;; Only advance the run boundary when this update introduced a new
              ;; tool call (appended at the end).  An in-place update of an
              ;; earlier tool must not erase an intervening entry's boundary.
@@ -5670,11 +5683,21 @@ CHUNK is an alist like:
    :namespace-id (map-elt chunk :namespace-id)
    :block-id (map-elt chunk :block-id)
    :body (map-elt chunk :body)
-   :append t
+   :append (map-elt chunk :append t)
    :create-new (map-elt chunk :create-new)
-   :navigation 'never
+   :navigation (unless (map-elt chunk :group-id) 'never)
    :render-body-images t
-   :above-last-prompt (map-elt chunk :above-last-prompt)))
+   :render-body (map-elt chunk :render-body t)
+   :label-left (map-elt chunk :label-left)
+   :label-right (map-elt chunk :label-right)
+   :expanded (map-elt chunk :expanded)
+   :group-id (map-elt chunk :group-id)
+   :group-label (map-elt chunk :group-label)
+   :group-expanded (map-elt chunk :group-expanded t)
+   :above-last-prompt (map-elt chunk :above-last-prompt))
+  (when-let* ((group-id (map-elt chunk :group-id)))
+    (agent-shell--refresh-activity-group-header state group-id)
+    (agent-shell--sync-activity-group-fold :state state :group-id group-id)))
 
 (defun agent-shell--flush-stream-render (state)
   "Render STATE's pending streamed text, if any."
@@ -5685,16 +5708,29 @@ CHUNK is an alist like:
     (agent-shell--render-streamed-chunk state pending)))
 
 (cl-defun agent-shell--update-streamed-fragment (&key state namespace-id block-id body
-                                                      create-new above-last-prompt)
+                                                      create-new above-last-prompt
+                                                      label-left label-right expanded
+                                                      group-id group-label (group-expanded t)
+                                                      (append t) (render-body t))
   "Append BODY to streamed fragment BLOCK-ID in STATE.
 
 NAMESPACE-ID, CREATE-NEW, and ABOVE-LAST-PROMPT follow
 `agent-shell--update-fragment'.  Chunks for the same fragment are
 batched while `agent-shell--stream-render-interval' is non-nil.  A
-different fragment or CREATE-NEW flushes the previous batch first."
+different fragment, replacement, or CREATE-NEW flushes the previous batch
+first.  LABEL-LEFT, LABEL-RIGHT, EXPANDED, GROUP-ID, GROUP-LABEL,
+GROUP-EXPANDED, APPEND, and RENDER-BODY follow `agent-shell--update-fragment'."
   (let ((chunk (list (cons :namespace-id namespace-id)
                      (cons :block-id block-id)
                      (cons :body body)
+                     (cons :append append)
+                     (cons :render-body render-body)
+                     (cons :label-left label-left)
+                     (cons :label-right label-right)
+                     (cons :expanded expanded)
+                     (cons :group-id group-id)
+                     (cons :group-label group-label)
+                     (cons :group-expanded group-expanded)
                      (cons :create-new create-new)
                      (cons :above-last-prompt above-last-prompt)))
         (pending (map-elt state :stream-render-pending)))
@@ -5702,10 +5738,15 @@ different fragment or CREATE-NEW flushes the previous batch first."
      ((not agent-shell--stream-render-interval)
       (agent-shell--render-streamed-chunk state chunk))
      ((and pending
+           append
            (not create-new)
+           (eq (map-elt pending :render-body) render-body)
            (equal (map-elt pending :namespace-id) namespace-id)
            (equal (map-elt pending :block-id) block-id))
-      (map-put! pending :body (concat (map-elt pending :body) body)))
+      (when body
+        (map-put! pending :body (concat (map-elt pending :body) body)))
+      (when label-left (map-put! pending :label-left label-left))
+      (when label-right (map-put! pending :label-right label-right)))
      (t
       (agent-shell--flush-stream-render state)
       (map-put! state :stream-render-pending chunk)
@@ -5713,7 +5754,7 @@ different fragment or CREATE-NEW flushes the previous batch first."
 
 (cl-defun agent-shell--update-fragment (&key state namespace-id block-id label-left label-right
                                              body append create-new navigation expanded
-                                             render-body-images above-last-prompt
+                                             render-body-images (render-body t) above-last-prompt
                                              group-id group-label (group-expanded t))
   "Update fragment in the shell buffer.
 
@@ -5727,7 +5768,8 @@ Dialog can have LABEL-LEFT, LABEL-RIGHT, and BODY.
 Optional flags: APPEND text to existing content, CREATE-NEW block,
 NAVIGATION for navigation style, EXPANDED to show block expanded
 by default, RENDER-BODY-IMAGES to enable inline image rendering in
-body, ABOVE-LAST-PROMPT to land content above the active prompt
+body, RENDER-BODY to render Markdown (nil keeps terminal previews literal),
+ABOVE-LAST-PROMPT to land content above the active prompt
 instead of after it (typical for notifications arriving out of
 turn).  Ignored while `agent-shell-persistent-prompt-enabled' is on, where a
 prompt is live for the whole turn and everything renders above it.
@@ -5798,7 +5840,8 @@ with GROUP-EXPANDED as the group's initial fold state."
           (save-excursion
             ;; Apply markdown to body.
             (save-restriction
-              (when-let* ((body-start (map-nested-elt range '(:body :start)))
+              (when-let* ((render-body)
+                          (body-start (map-nested-elt range '(:body :start)))
                           (body-end (map-nested-elt range '(:body :end))))
                 (narrow-to-region body-start body-end)
                 ;; Skip rendering when body is collapsed; it will be
@@ -5883,7 +5926,8 @@ with GROUP-EXPANDED as the group's initial fold state."
              ;; `read-only t' from `agent-shell-ui--insert-fragment',
              ;; and `agent-shell-markdown' modifies buffer chars
              ;; (unlike the overlay renderer which only adds overlays).
-             (when-let* ((body-start (map-nested-elt range '(:body :start)))
+             (when-let* ((render-body)
+                         (body-start (map-nested-elt range '(:body :start)))
                          (body-end (map-nested-elt range '(:body :end))))
                (narrow-to-region body-start body-end)
                ;; Skip rendering when body is collapsed; it will be
@@ -9278,6 +9322,8 @@ Examples:
           ;; `rawOutput' is agent-defined free-form JSON, so only
           ;; render formatted_output when it's actually a string.
           ((stringp raw-output) raw-output)
+          ((map-elt acp-update :output-chunks)
+           (agent-shell--tool-output-chunks-markdown (map-elt acp-update :output-chunks)))
           (t ""))))
 
 (defun agent-shell--content-block-to-markdown (acp-content-block)
