@@ -6,18 +6,18 @@
 ;;; Code:
 
 (require 'ert)
+(require 'lisp-mode)
 (require 'package)
 (require 'subr-x)
 
 (defvar agent-shell-rename-tests--steering-command)
+(defvar agent-shell-rename-runtime--agent-functions)
+(declare-function agent-shell-rename-runtime--from-p "agent-shell-rename-runtime" (symbol directory))
 
 (defun agent-shell-rename-acceptance--assert-source (symbol directory)
   "Require SYMBOL's loaded definition to come from DIRECTORY."
   (let ((source (symbol-file symbol 'defun)))
-    (unless (and source
-                 (not (autoloadp (symbol-function symbol)))
-                 (file-in-directory-p (file-truename source)
-                                      (file-truename directory)))
+    (unless (agent-shell-rename-runtime--from-p symbol directory)
       (error "%s loaded from %s; expected %s" symbol source directory))
     (princ (format "%s: %s\n" symbol source))))
 
@@ -40,43 +40,46 @@
   (let ((matches nil))
     (with-temp-buffer
       (insert-file-contents file)
+      (set-syntax-table emacs-lisp-mode-syntax-table)
       (goto-char (point-min))
-      (letrec ((visit (lambda (form)
-                        (when (consp form)
-                          (if (funcall predicate form)
-                              (push form matches)
-                            (unless (memq (car form) '(quote function))
-                              (funcall visit (car form))
-                              (funcall visit (cdr form))))))))
-        (condition-case nil
-            (while t (funcall visit (read (current-buffer))))
-          (end-of-file nil))))
+      (while (progn (forward-comment (point-max)) (not (eobp)))
+        (let ((pending (list (read (current-buffer)))))
+          (while pending
+            (let ((form (pop pending)))
+              (when (consp form)
+                (if (funcall predicate form)
+                    (push form matches)
+                  (unless (memq (car form) '(quote function))
+                    (push (cdr form) pending)
+                    (push (car form) pending)))))))))
     (nreverse matches)))
 
 (defun agent-shell-rename-acceptance--binding (file)
-  "Load only FILE's Agent Shell C-<return> command definition."
+  "Return FILE's Agent Shell C-<return> command, loading any local definition."
   (let* ((bindings
           (agent-shell-rename-acceptance--forms
            file (lambda (form)
                   (and (eq (car form) 'define-key)
                        (eq (nth 1 form) 'agent-shell-mode-map)
                        (equal (nth 2 form) '(kbd "C-<return>"))))))
-         (command (nth 1 (nth 3 (car bindings))))
+         (command (pcase (nth 3 (car bindings))
+                    ((or `(function ,command) `(quote ,command))
+                     (and (symbolp command) command))))
          (definitions
           (and (symbolp command) command
                (agent-shell-rename-acceptance--forms
                 file (lambda (form)
                        (and (eq (car form) 'defun)
                             (eq (nth 1 form) command)))))))
-    (unless (and (= (length bindings) 1)
-                 (memq (car-safe (nth 3 (car bindings))) '(function quote))
-                 (= (length definitions) 1))
-      (error "Expected one agent-shell C-<return> binding and its defun in %s" file))
-    (eval (car definitions) t)
+    (unless (and (= (length bindings) 1) (= (length (car bindings)) 4) command)
+      (error "Expected one literal agent-shell C-<return> binding without REMOVE in %s" file))
+    (when (> (length definitions) 1)
+      (error "Multiple definitions of %s in %s" command file))
+    (when definitions
+      (eval (car definitions) t))
     (unless (commandp command)
       (error "C-<return> does not name an interactive command: %s" command))
-    (setq agent-shell-rename-tests--steering-command command)
-    (princ (format "C-<return>: %s, extracted from %s\n" command file))))
+    command))
 
 (defun agent-shell-rename-acceptance-run ()
   "Run all required rename workflows against both configured checkouts."
@@ -86,6 +89,8 @@
          (shell-maker (file-truename (getenv "AGENT_SHELL_RENAME_SHELL_MAKER")))
          (acp (getenv "AGENT_SHELL_RENAME_ACP"))
          (init (getenv "AGENT_SHELL_RENAME_INIT")))
+    (require 'agent-shell-rename-runtime
+             (expand-file-name "scripts/agent-shell-rename-runtime.el" root))
     (package-initialize)
     (setq load-prefer-newer t)
     (unless (string-empty-p acp)
@@ -95,10 +100,8 @@
     (require 'agent-shell)
     (require 'acp-fakes)
     (princ (format "Emacs: %s\n" emacs-version))
-    (agent-shell-rename-acceptance--assert-source 'agent-shell-submit root)
-    (agent-shell-rename-acceptance--assert-source 'agent-shell-viewport--shell-buffer root)
-    (agent-shell-rename-acceptance--assert-source 'agent-shell-experimental--send-steering root)
-    (agent-shell-rename-acceptance--assert-source 'agent-shell--prompt-input root)
+    (dolist (entry agent-shell-rename-runtime--agent-functions)
+      (agent-shell-rename-acceptance--assert-source (cdr entry) root))
     (agent-shell-rename-acceptance--assert-source 'shell-maker--process shell-maker)
     (princ (format "ACP: %s\nACP fake server: %s\n"
                    (symbol-file 'acp-send-request) (symbol-file 'acp-fakes-make-client)))
@@ -113,7 +116,11 @@
     (load (expand-file-name "tests/agent-shell-rename-tests.el" root) nil t)
     (if (string-empty-p init)
         (princ "C-<return>: agent-shell-submit-override (fixture binding; use --init to check yours)\n")
-      (agent-shell-rename-acceptance--binding (expand-file-name init)))
+      (let ((file (expand-file-name init)))
+        (setq agent-shell-rename-tests--steering-command
+              (agent-shell-rename-acceptance--binding file))
+        (princ (format "C-<return>: %s, extracted from %s\n"
+                       agent-shell-rename-tests--steering-command file))))
     (dolist (test '(shell-maker-rename-raw-buffer-keeps-process-test
                     shell-maker-rename-streaming-output-test
                     agent-shell-rename-raw-steering-test
@@ -122,7 +129,14 @@
                     agent-shell-rename-acceptance-steering-test
                     agent-shell-rename-acceptance-viewport-test
                     agent-shell-rename-acceptance-interrupt-test
-                    agent-shell-rename-acceptance-restart-reload-test))
+                    agent-shell-rename-acceptance-restart-reload-test
+                    agent-shell-rename-tooling-reads-command-without-running-init-test
+                    agent-shell-rename-tooling-rejects-truncated-init-test
+                    agent-shell-rename-tooling-large-init-test
+                    agent-shell-rename-tooling-existing-command-test
+                    agent-shell-rename-tooling-rejects-unusable-binding-test
+                    agent-shell-rename-tooling-runtime-ignores-autoloads-test
+                    agent-shell-rename-tooling-runtime-leaves-stale-shell-untouched-test))
       (unless (ert-test-boundp test)
         (error "Required acceptance test is missing: %s" test)))
     (let ((stats (ert-run-tests-batch "^\\(agent-shell-rename-\\|shell-maker-rename-\\)")))

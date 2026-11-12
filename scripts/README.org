@@ -12,11 +12,17 @@ loaded library paths, and runs all rename tests from both repositories.
 Any failed or skipped test makes the command fail.  Missing required
 workflow tests also make it fail.
 
-=--init= reads only the agent-shell =C-<return>= binding and its command's
-=defun= from that file.  The command is invoked in the isolated test
-process; the rest of the init file is never evaluated.  Without =--init=,
-the tests bind =C-<return>= to =agent-shell-submit-override= and report that
-they used the fixture binding.
+=--init= reads the agent-shell =C-<return>= binding and loads its command's
+=defun= when defined in that file.  A command already supplied by Agent
+Shell can be bound directly.  The command is invoked in the isolated test
+process; other init forms are never evaluated.  Malformed input is rejected,
+and large configuration blocks do not require recursive traversal.
+Without =--init=, the tests bind =C-<return>= to =agent-shell-submit-override=
+and report that they used the fixture binding.
+
+The supported binding is one literal =define-key= form with three arguments:
+the keymap, the key, and a named command.  Forms with a =REMOVE= argument are
+rejected.  The runtime report below checks the binding in an existing session.
 
 Use =--shell-maker /path/to/checkout= to select the companion checkout.
 Use =--acp /path/to/acp= to select an ACP source directory; otherwise the

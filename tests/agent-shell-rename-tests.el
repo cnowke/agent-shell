@@ -5,9 +5,91 @@
 (require 'ert)
 (require 'agent-shell)
 (require 'acp-fakes)
+(require 'agent-shell-rename-acceptance
+         (expand-file-name "../scripts/agent-shell-rename-acceptance.el"
+                           (file-name-directory
+                            (or (bound-and-true-p byte-compile-current-file)
+                                load-file-name buffer-file-name))))
+(require 'agent-shell-rename-runtime
+         (expand-file-name "../scripts/agent-shell-rename-runtime.el"
+                           (file-name-directory
+                            (or (bound-and-true-p byte-compile-current-file)
+                                load-file-name buffer-file-name))))
 
 (defvar agent-shell-rename-tests--shells nil)
 (defvar agent-shell-rename-tests--steering-command #'agent-shell-submit-override)
+
+(defmacro agent-shell-rename-tests--with-init (contents &rest body)
+  "Run BODY with `init-file' containing CONTENTS."
+  (declare (indent 1) (debug t))
+  `(let ((init-file (make-temp-file "agent-shell-rename-init-" nil ".el")))
+     (unwind-protect
+         (progn
+           (with-temp-file init-file (insert ,contents))
+           ,@body)
+       (delete-file init-file))))
+
+(ert-deftest agent-shell-rename-tooling-reads-command-without-running-init-test ()
+  "Extract the steering command while leaving other init forms unevaluated."
+  (agent-shell-rename-tests--with-init
+      "(error \"Do not evaluate the init file\")
+(progn
+  '(define-key agent-shell-mode-map (kbd \"C-<return>\") #'ignore)
+  (defun agent-shell-rename-tests--init-steer ()
+    (interactive)
+    (agent-shell-submit-override))
+  (define-key agent-shell-mode-map (kbd \"C-<return>\")
+              #'agent-shell-rename-tests--init-steer))
+; trailing comment
+"
+    (unwind-protect
+        (let ((command (agent-shell-rename-acceptance--binding init-file)))
+          (should (eq 'agent-shell-rename-tests--init-steer command))
+          (should (commandp command)))
+      (fmakunbound 'agent-shell-rename-tests--init-steer))))
+
+(ert-deftest agent-shell-rename-tooling-rejects-truncated-init-test ()
+  "An unfinished form must not be accepted as the end of the init file."
+  (agent-shell-rename-tests--with-init
+      "(defun agent-shell-rename-tests--init-steer ()
+  (interactive)
+  (agent-shell-submit-override))
+(define-key agent-shell-mode-map (kbd \"C-<return>\")
+            #'agent-shell-rename-tests--init-steer)
+(defun unfinished ()\n"
+    (unwind-protect
+        (should-error (agent-shell-rename-acceptance--binding init-file)
+                      :type 'end-of-file)
+      (fmakunbound 'agent-shell-rename-tests--init-steer))))
+
+(ert-deftest agent-shell-rename-tooling-large-init-test ()
+  "Walking a large flat init form does not consume the Lisp call stack."
+  (agent-shell-rename-tests--with-init
+      (concat "(progn\n"
+              (string-join (make-list 1000 "(ignore)") "\n")
+              "\n(define-key agent-shell-mode-map (kbd \"C-<return>\") #'ignore))\n")
+    (let ((max-lisp-eval-depth 200))
+      (should (= 1 (length
+                    (agent-shell-rename-acceptance--forms
+                     init-file (lambda (form) (eq (car form) 'define-key)))))))))
+
+(ert-deftest agent-shell-rename-tooling-existing-command-test ()
+  "An init binding can use a command already defined by Agent Shell."
+  (agent-shell-rename-tests--with-init
+      "(define-key agent-shell-mode-map (kbd \"C-<return>\") #'agent-shell-submit-override)\n"
+    (should (eq #'agent-shell-submit-override
+                (agent-shell-rename-acceptance--binding init-file)))))
+
+(ert-deftest agent-shell-rename-tooling-rejects-unusable-binding-test ()
+  "Reject ambiguous, removed, undefined, and malformed command bindings."
+  (dolist (contents
+           '("(define-key agent-shell-mode-map (kbd \"C-<return>\") #'ignore)
+(define-key agent-shell-mode-map (kbd \"C-<return>\") #'agent-shell-submit-override)\n"
+             "(define-key agent-shell-mode-map (kbd \"C-<return>\") #'agent-shell-submit-override t)\n"
+             "(define-key agent-shell-mode-map (kbd \"C-<return>\") #'undefined-agent-shell-rename-test-command)\n"
+             "(define-key agent-shell-mode-map (kbd \"C-<return>\") (function agent-shell-submit-override extra))\n"))
+    (agent-shell-rename-tests--with-init contents
+      (should-error (agent-shell-rename-acceptance--binding init-file)))))
 
 (defun agent-shell-rename-tests--shell (&optional start-function)
   "Create and track a shell without starting an ACP client.
@@ -51,6 +133,44 @@ Use START-FUNCTION to select the shell startup function."
                (set-buffer-modified-p nil)
                (kill-buffer buffer)))))
        (delete-directory directory t))))
+
+(ert-deftest agent-shell-rename-tooling-runtime-ignores-autoloads-test ()
+  "An autoload does not count as a loaded checkout definition."
+  (cl-letf (((symbol-function 'agent-shell-submit)
+             '(autoload "missing-rename-test" nil t)))
+    (should-not (agent-shell-rename-runtime--source 'agent-shell-submit))
+    (should-not (agent-shell-rename-runtime--from-p
+                 'agent-shell-submit agent-shell-rename-runtime--root))))
+
+(ert-deftest agent-shell-rename-tooling-runtime-leaves-stale-shell-untouched-test ()
+  "The diagnostic reports a stale name without repairing or creating buffers."
+  (agent-shell-rename-tests--with-shells 1
+    (with-current-buffer (car agent-shell-rename-tests--shells)
+      (let ((original-name (buffer-name)))
+        (remove-hook 'buffer-list-update-hook #'shell-maker--sync-buffer-name t)
+        (rename-buffer " *diagnose-stale-rename*" t)
+        (let ((name (buffer-name))
+              (text (buffer-string))
+              (tick (buffer-chars-modified-tick))
+              (position (point))
+              (state agent-shell--state)
+              (stored-name shell-maker--buffer-name-override)
+              (hooks (copy-sequence buffer-list-update-hook))
+              (process (get-buffer-process (current-buffer))))
+          (should-not (get-buffer original-name))
+          (let ((report (agent-shell-rename-runtime-report)))
+            (should (string-match-p "Name synchronized: no" report))
+            (should (string-match-p "Rename hook installed: no" report))
+            (should (string-match-p "Process live: yes" report)))
+          (should (equal name (buffer-name)))
+          (should (equal text (buffer-string)))
+          (should (= tick (buffer-chars-modified-tick)))
+          (should (= position (point)))
+          (should (eq state agent-shell--state))
+          (should (equal stored-name shell-maker--buffer-name-override))
+          (should (equal hooks buffer-list-update-hook))
+          (should (eq process (get-buffer-process (current-buffer))))
+          (should-not (get-buffer original-name)))))))
 
 (defun agent-shell-rename-tests--steer (rename-function rename-after-submit)
   "Steer through a rename using RENAME-FUNCTION.

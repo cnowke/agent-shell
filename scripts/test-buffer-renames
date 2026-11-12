@@ -22,7 +22,7 @@ while [ "$#" -gt 0 ]; do
             ;;
         --help)
             echo "Usage: $0 [--shell-maker CHECKOUT] [--acp DIRECTORY] [--init FILE]"
-            echo "Runs isolated batch tests; --init reads only the C-<return> binding and its defun."
+            echo "Runs isolated batch tests; --init reads the C-<return> binding and any local defun."
             exit 0
             ;;
         *)
