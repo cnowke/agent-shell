@@ -1,211 +1,61 @@
-#+title: Agent Shell and Shell Maker: session handoff
+#+title: Agent Shell / Shell Maker session summary
 #+date: 2026-11-13
 
-* TODO Keep this personal file out of the upstream PR
+* TODO Keep this file out of the upstream PR
 
-This is working context for continuing on another computer. Keep this file
-and =replay-docstring-pr-notes.org= on the personal notes branch only.
-The prepared upstream contribution is on =fix/replay-docstring-pr=.
+Personal handoff notes only. Keep this file and
+=replay-docstring-pr-notes.org= on =fix/replay-docstring=.
 
-* Start here
+* What we fixed
 
-The immediate contribution under discussion fixes the replay helper's
-docstring quoting in Agent Shell. The fix, tests, reproduction notes,
-and a separate clean PR branch are ready. We have not opened a PR.
+- Buffer renames: coordinated fixes in Agent Shell and Shell Maker keep
+  buffer references valid after renaming, including C-Enter steering,
+  viewport drafts, and reuse of the old name. The rename test gate passed
+  41 tests with no skips. Run =./scripts/test-buffer-renames= from the
+  Agent Shell rename checkout with the Shell Maker rename checkout beside it.
+- Replay docstring: unescaped quotes in
+  =tests/agent-shell-fakes.el=, function =agent-shell-fakes--synth-exchange=,
+  caused =(void-variable session/new)= when replaying partial captures.
+  We escaped the quotes and added two regression tests in
+  =tests/agent-shell-fakes-tests.el=. Both fail before the fix and pass after.
+  Reproduction commands are in [[file:replay-docstring-pr-notes.org][replay-docstring-pr-notes.org]].
+- Upstream main was merged into all existing feature branches and pushed.
+  Last merged snapshots: Agent Shell =4280a74=, Shell Maker =b28ee61=.
 
-The buffer rename fixes in Agent Shell and Shell Maker are separate work.
-The three streaming output variants are also separate work; preserve them.
-Do not fold any of these changes into the replay PR.
-
-The last requested code operation was to merge upstream main into all
-existing feature branches. That was completed and pushed without rebasing.
-The last merged upstream snapshots were Agent Shell =4280a74= and Shell
-Maker =b28ee61=. Fetch before assuming these are still upstream's latest.
-
-* User constraints and authorization
-
-- Never kill, restart, connect to, or change the user's running Emacs.
-  Do not use =emacsclient=. Verification uses isolated =emacs -Q --batch=.
-- Do not edit, stage, or commit the user's =emacs/init.el= as part of this work.
-- Commits and pushes to the user's personal forks have been authorized.
-  Upstream PRs, issues, comments, and other upstream writes have not.
-- Keep personal notes out of the upstream contribution.
-- Preserve unrelated worktrees, branches, and concurrent work.
-- Read =AGENTS.md= and =CONTRIBUTING.org=. The maintainer asks contributors
-  to review the code themselves and write their own PR descriptions/comments.
-
-* Repositories and branch snapshot
+* Where the work is
 
 Personal forks:
-
 - https://github.com/cnowke/agent-shell
 - https://github.com/cnowke/shell-maker
 
-On the original computer, =personal= points to the fork and =origin= to
-=xenodium/agent-shell= or =xenodium/shell-maker=. Authenticate as =cnowke=
-for personal fork writes. Remote names matter: do not accidentally push
-to upstream. No credentials or local authentication settings are included here.
+| Repository  | Branch                             | Purpose                         |
+|-------------+------------------------------------+---------------------------------|
+| agent-shell | fix/replay-docstring               | Replay fix plus personal notes  |
+| agent-shell | fix/replay-docstring-pr            | Clean replay contribution       |
+| agent-shell | fix/buffer-renames                 | Rename and steering fixes       |
+| shell-maker | fix/buffer-renames                 | Required companion rename fix   |
+| agent-shell | fix/streaming-tool-output          | Separate streaming work         |
+| agent-shell | fix/streaming-tool-output-preview  | Separate preview variant        |
+| agent-shell | fix/streaming-tool-output-batching | Separate batching variant       |
 
-The following source heads were verified pushed on 2026-11-13. The personal
-notes branch advances again with the documentation commit containing this file.
+On this computer, =personal= is the fork remote and =origin= is upstream.
+Keep the streaming branches separate from the replay contribution.
 
-| Repository  | Branch                              | Source head |
-|-------------+-------------------------------------+-------------|
-| agent-shell | main                                | 4280a74     |
-| agent-shell | fix/buffer-renames                  | 4c47ba1     |
-| agent-shell | fix/replay-docstring                | ae29ccb     |
-| agent-shell | fix/replay-docstring-pr             | 18630c3     |
-| agent-shell | fix/streaming-tool-output           | 1485d3d     |
-| agent-shell | fix/streaming-tool-output-preview   | d547e78     |
-| agent-shell | fix/streaming-tool-output-batching  | ff7ea3f     |
-| shell-maker | main                                | b28ee61     |
-| shell-maker | fix/buffer-renames                  | e5e5382     |
+* Next step
 
-All listed source worktrees were clean. The separate Emacs configuration
-checkout was on =newConfig= with an uncommitted modification to =init.el=.
-That file is not transferred by these fork pushes. Copy or commit it
-separately if it is needed on the other computer; do not publish it here.
+No upstream PR has been opened. The replay PR branch contains only the
+helper fix and its tests. Fetch upstream, review the diff, and rerun the
+relevant checks before contributing. When explicitly requested, the PR
+would use =xenodium/agent-shell:main= as base and
+=cnowke/agent-shell:fix/replay-docstring-pr= as head. The maintainer asks
+contributors to review the code and write their own PR descriptions.
 
-A separate, concurrent streaming handoff was being prepared on local
-=notes/streaming-output-handoff=. Check its own publication status rather
-than assuming this document replaces that work.
+* Remember when continuing
 
-* Replay docstring fix
-
-This is an Agent Shell bug, not a Shell Maker quoting bug.
-=tests/agent-shell-fakes.el= has unescaped quotes in the docstring of
-=agent-shell-fakes--synth-exchange=. They terminate the docstring early,
-so calling the helper evaluates =session/new= as a variable and raises
-=(void-variable session/new)=. Partial captures that need a synthetic
-initialization handshake therefore cannot be replayed reliably.
-
-The fix escapes the examples' quotes and clarifies the PARAMS sentence.
-Two regression tests in =tests/agent-shell-fakes-tests.el= cover synthetic
-request resolution and handshake generation for a partial capture.
-Both tests were verified to fail before the fix and pass afterward.
-
-The clean contribution branch is =fix/replay-docstring-pr=. Its diff
-against the last fetched upstream main contains exactly:
-
-- =tests/agent-shell-fakes.el=
-- =tests/agent-shell-fakes-tests.el=
-
-The personal =fix/replay-docstring= branch contains the fix plus notes.
-See [[file:replay-docstring-pr-notes.org][replay-docstring-pr-notes.org]] for the upstream reproduction and expected
-failure. From the fixed checkout, with the ACP package installed:
-
-#+begin_src sh
-emacs -Q --batch \
-  --eval '(progn (require (quote package)) (package-initialize))' \
-  --load tests/agent-shell-fakes-tests.el \
-  --eval '(ert-run-tests-batch-and-exit "^agent-shell-fakes-")'
-#+end_src
-
-Expected: two tests, no unexpected results. Strict byte compilation passed.
-Checkdoc has an existing upstream warning at line 216 of the fakes helper
-about quoting the symbol =agent-shell=; it is not introduced by this fix.
-
-If the user later authorizes opening the PR, use upstream
-=xenodium/agent-shell:main= as base and
-=cnowke/agent-shell:fix/replay-docstring-pr= as head. First fetch, review
-the final diff, rerun relevant checks, and have the user review and vouch
-for the contribution. Do not open it merely because this handoff exists.
-
-* Buffer renames and steering
-
-The coordinated rename branches are required in both repositories.
-Agent Shell associates its shell and viewport through buffer objects;
-Shell Maker synchronizes internal naming after raw buffer renames.
-The changes address stale lookups, old-name reuse, drafts, cleanup,
-restart/reload, and the user's C-Enter steering regression.
-
-=agent-shell-rename-buffer= works from the shell or viewport and remaps
-the normal rename command. The user's C-Enter binding invokes
-=ins/agent-shell-submit-steering=; its local configuration is not committed
-to these repositories.
-
-From the Agent Shell rename checkout, with the Shell Maker rename
-checkout at =../shell-maker=:
-
-#+begin_src sh
-./scripts/test-buffer-renames
-# Optional: inspect the supported literal binding without evaluating init.el.
-./scripts/test-buffer-renames --init /path/to/init.el
-#+end_src
-
-The gate passed 41 tests with zero skips. It exercises fake ACP request
-handling, steering around acknowledgements, streaming, viewport drafts
-and queues, interrupt, restart/reload, and old-name reuse. It checks loaded
-source revisions and requires the essential tests. Use =--shell-maker PATH=
-or =--acp PATH= when dependencies are elsewhere.
-
-=scripts/agent-shell-rename-runtime.el= provides the read-only command
-=agent-shell-rename-runtime-report= for diagnosing loaded sources, key
-bindings, hooks, ownership, and processes. The user may load it manually;
-do not load or reload anything into their running Emacs yourself. A disk
-revision alone does not prove which definitions an existing process loaded.
-
-* Streaming branches and validation limits
-
-The streaming variants have their own worktrees and histories. The preview
-and batching heads include newer fixes for history finalization, benchmark
-fixtures, Emacs 31 warnings, and transient-file fixture isolation. Preserve
-these commits and check current CI before making claims about those heads.
-
-At the upstream merge heads, the full source suites passed with four
-GUI-dependent skips per suite: replay 1021/1025; rename 1053/1057;
-streaming 1042/1046; batching 1043/1047; preview 1045/1049.
-The rename-specific 41-test gate had zero skips. These counts describe
-the tested merge snapshots, not a fresh run on every later commit.
-
-The replay merge's Tests run passed:
-https://github.com/cnowke/agent-shell/actions/runs/43264698487
-The paired rename gate passed:
-https://github.com/cnowke/agent-shell/actions/runs/43264697246
-
-The separate Test Report publisher has sometimes failed with a GitHub
-check-run API 404 even when Tests passed. Inspect actual test results
-and the report failure separately; do not assume all checks are green.
-
-* Restore on another computer
-
-Git carries the committed files and pushed branches. This Org note carries
-the decisions and next steps; it is not an export of the entire chat.
-Install Git, an appropriate Emacs, and the ACP dependency before tests.
-
-For fresh clones, preserving the original fork/upstream remote names:
-
-#+begin_src sh
-mkdir -p ~/Dev/agent-shell-work
-cd ~/Dev/agent-shell-work
-git clone --origin personal https://github.com/cnowke/agent-shell.git
-git clone --origin personal https://github.com/cnowke/shell-maker.git
-git -C agent-shell remote add origin https://github.com/xenodium/agent-shell.git
-git -C shell-maker remote add origin https://github.com/xenodium/shell-maker.git
-git -C agent-shell fetch origin
-git -C shell-maker fetch origin
-git -C agent-shell switch --track personal/fix/buffer-renames
-git -C shell-maker switch --track personal/fix/buffer-renames
-git -C agent-shell worktree add -b fix/replay-docstring ../agent-shell-replay-fix personal/fix/replay-docstring
-git -C agent-shell worktree add -b fix/replay-docstring-pr ../agent-shell-replay-pr personal/fix/replay-docstring-pr
-#+end_src
-
-The other feature branches are fetched too. Add worktrees for them when
-needed. For existing clones, inspect status and fetch the fork instead;
-do not reset or overwrite existing work just to reproduce this layout.
-
-Open Codex in the restored workspace and give it this starting instruction:
-
-#+begin_example
-Read SESSION-HANDOFF.org and replay-docstring-pr-notes.org in the
-agent-shell-replay-fix checkout, then read the repository instructions.
-Verify the current branches, worktrees, fork refs, and CI before editing.
-Continue the replay contribution preparation with me from that state.
-Preserve the rename and streaming branches. Do not touch running Emacs
-or open an upstream PR without my instruction.
-#+end_example
-
-For the Codex CLI, =codex resume= reopens saved local chats. Cloning Git
-repositories does not itself transfer that local chat history. See
-https://learn.chatgpt.com/docs/codex/cli for the CLI documentation. The
-handoff above works even when the previous conversation is unavailable.
+- Never kill, restart, or change running Emacs. No =emacsclient=.
+  Use isolated =emacs -Q --batch= for checks.
+- Push only to the personal forks. Do not open an upstream PR without asking.
+- The user's =emacs/init.el= has an uncommitted local change. It needs
+  separate transfer if wanted on the other computer; leave it untouched here.
+- Read this file, the reproduction notes, and =AGENTS.md= in the next session.
+  Check current Git status and CI before changing anything.
