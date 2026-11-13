@@ -1,0 +1,191 @@
+#+title: Agent Shell streaming output: handoff
+#+date: 2026-11-13
+#+startup: overview
+
+* Resume here
+
+We investigated high Emacs CPU usage during Codex terminal-output streaming,
+implemented fixes in Christian's personal fork, reviewed them against the
+package guidelines, and completed validation. The changes are committed and
+pushed. The next session should continue from this checkpoint.
+
+Suggested opening prompt:
+
+#+begin_example
+Read STREAMING_OUTPUT_HANDOFF.org. Inspect the recorded fork branches and
+their current heads. Continue from this checkpoint; the code review and
+validation are complete. Do not repeat tests unless new changes, failures,
+or unresolved concerns justify it. Wait for my next task before installing
+a candidate or preparing an upstream contribution.
+#+end_example
+
+This document lives on =notes/streaming-output-handoff= in the personal fork.
+To retrieve it on another computer:
+
+#+begin_src sh
+git clone --branch notes/streaming-output-handoff https://github.com/cnowke/agent-shell.git
+cd agent-shell
+#+end_src
+
+* Repository and branch checkpoints
+
+- Personal fork: https://github.com/cnowke/agent-shell
+- Upstream: https://github.com/xenodium/agent-shell
+
+| Branch                              | Last verified commit                     | Purpose                                      |
+|-------------------------------------+------------------------------------------+----------------------------------------------|
+| fix/streaming-tool-output-batching   | ff7ea3f970be0d1f915d8e40e4052008fa2e083f | Performance fix with uncapped live output     |
+| fix/streaming-tool-output-preview    | d547e78cb9bdb4adee822817ed699eabc2f7d88e | Same implementation with a live-preview cap   |
+
+Both candidates contain upstream through
+=4280a745d9671e5f7e80690aff49eb66cb208f8c=, the last upstream revision tested.
+Upstream merges made outside our review work were preserved. Both candidate
+worktrees were clean, and these heads were verified against the remote on
+2026-11-13.
+
+Review fixes were committed separately to both candidates. The current
+batching head is not an ancestor of the preview head. Inspect their diff
+before combining them.
+
+For separate working directories, run from the new notes checkout:
+
+#+begin_src sh
+git worktree add ../agent-shell-batching -b fix/streaming-tool-output-batching origin/fix/streaming-tool-output-batching
+git worktree add ../agent-shell-preview -b fix/streaming-tool-output-preview origin/fix/streaming-tool-output-preview
+#+end_src
+
+An earlier combined branch, =fix/streaming-tool-output=, remains in the fork.
+Its remote head was =1485d3d9e3a6b4a3de1215306cfe0bb26aff5e8c= at handoff.
+The original computer's installed package is still =f517952= on that branch.
+The installed package and the two reviewed candidates are different revisions.
+
+* Findings and design decisions
+
+Streaming Codex terminal deltas caused repeated copies and re-rendering of
+the growing output. The fix retains reversed lists of original chunks,
+inserts the first chunk immediately, and batches later literal appends using
+the existing stream-render timer. Complete output is assembled for final
+rendering and transcripts when a command completes or is interrupted.
+
+- The generic render queue also accumulates chunks without copying its whole
+  pending body on every append. It preserves nil-versus-empty semantics and
+  text properties.
+- Existing =:render-body= handling selects literal insertion. An earlier
+  design with eight extra queue parameters was removed.
+- Codex metadata remains in =agent-shell-openai.el=. Core rendering and
+  finalization helpers live in =agent-shell-tool-output.el=.
+- The preview branch adds a limit of 32,768 /characters/ to live terminal
+  output. Full final output and transcripts are preserved. There is no new
+  =defcustom=; the cap is separate from the batching fix.
+
+Review caught a history-restore bug: =first-last= replay can omit a tool's
+later completion or replacement snapshot. Finalization now uses the chunks
+retained by the preview actually rendered. A provider cache can already
+contain later updates from omitted turns, so it cannot determine the visible
+prefix. Completed cache entries are released correctly.
+
+Regression coverage includes omitted completions and replacement snapshots,
+metadata-only restore, background continuation, request success/cancellation/
+error callbacks, actual cleanup, interleaved tools, chunk boundaries, timers,
+folds, and transcript preservation.
+
+* Warnings and intermittent tests
+
+The user noticed Emacs warnings during testing. Fixes on both branches:
+
+- Replaced obsolete =replace-buffer-contents= with =replace-region-contents=.
+  Emacs 29/30 receive a callback; Emacs 31 receives the source buffer. A real
+  ACP file-write test checks saved contents and marker preservation.
+- Replaced an obsolete =when-let= and corrected checkdoc references.
+- Disabled native trampolines only within the source-loaded Markdown test
+  that mocks =file-exists-p=. Warnings remain enabled generally.
+- Kept source files beside temporary bytecode files to avoid native compiler
+  lookup warnings from the test setup.
+- Made the benchmark reuse fixtures when the test suite is already loaded.
+
+An intermittent drag-and-drop test failure came from directory-attribute
+comparisons racing file creation in the shared temporary directory. A
+scratch reproduction produced 9,961 false negatives in 10,000 checks under
+churn, versus zero in an isolated directory. The two affected tests now use
+private temporary directories. Each passed 1,000 repetitions while another
+process continuously created and removed files in the shared directory.
+Production drag-and-drop behavior was not changed.
+
+* Completed validation
+
+On Emacs 31.1, source and bytecode suites passed without Emacs warnings:
+
+| Candidate | Tests | Passed in batch | Display-only skips |
+|-----------+-------+-----------------+--------------------|
+| Batching  |  1052 |            1048 |                  4 |
+| Preview   |  1054 |            1050 |                  4 |
+
+All four display-only tests also passed in separate graphical Emacs sessions
+for each branch. Production byte compilation and checkdoc passed without
+warnings. The sources staged for byte compilation were compared with the
+final production files.
+
+Emacs 29.1 Linux CI passed at the recorded candidate heads:
+
+- [[https://github.com/cnowke/agent-shell/actions/runs/43269557470][Batching CI: ff7ea3f]]
+- [[https://github.com/cnowke/agent-shell/actions/runs/43269559204][Preview CI: d547e78]]
+
+The normal CI invocation is in =.github/workflows/test.yml=. The committed
+=tests/agent-shell-tool-output-benchmark.el= documents benchmark usage with
+the ACP and shell-maker dependencies available on =load-path=.
+
+* Performance evidence and its limits
+
+Matched synthetic source workload: seven buffers, 512 KiB of output per
+buffer, 16 KiB flush intervals, and 120 previous labeled turns per buffer.
+
+| Version                  | Streaming seconds |
+|--------------------------+-------------------|
+| Tested upstream 4280a74  |            33.251 |
+| Batching ff7ea3f         |             4.144 |
+| Preview d547e78          |             4.013 |
+
+A 14 MiB single-buffer burst took 0.321 seconds streaming plus 0.323 seconds
+completion on batching; preview took 0.276 plus 0.321 seconds. Both saved
+14,680,157 transcript characters. The capped live buffer contained 32,877
+characters including surrounding UI.
+
+These are synthetic results. A short live observation had too little traffic
+to establish an overall CPU reduction. Earlier profiling found substantial
+chat-label refresh cost, consistent with [[https://github.com/xenodium/agent-shell/issues/943][upstream issue #943]]. That is a
+separate bottleneck. Recheck upstream issue and PR status before relying on
+their current state; no chat-label refresh fix was implemented here.
+
+* Original computer state
+
+- Config checkout: =~/Dev/emacs=, branch =newConfig=. Its =init.el= contains
+  uncommitted changes, including unrelated user work. Those changes were not
+  committed or pushed during this review. Its package declaration selects
+  the older =fix/streaming-tool-output= branch.
+- Installed package: =~/.emacs.d/elpa/agent-shell=, revision =f517952=.
+  Generated untracked =agent-shell-pkg.el= is expected.
+- Batching worktree: =~/Dev/agent-shell-streaming-refactor=.
+- Preview worktree: =~/Dev/agent-shell-streaming-preview=.
+- Original fix worktree: =~/Dev/agent-shell-streaming-output=.
+- Separate unrelated checkout: =~/Dev/agent-shell= on =fix/buffer-renames=.
+- Package backup: =~/.emacs.d/package-backups/agent-shell-20261106.1213=.
+
+Local test logs were retained under =/tmp/agent-shell-*=. This document and
+the CI links preserve the important results; code and regression tests are
+committed in the fork. No investigation process needs to remain running.
+
+* Working agreements and next decisions
+
+- Read =AGENTS.md= and =CONTRIBUTING.org= before editing. Follow the package's
+  alist/map/seq conventions, keyword state keys, dedicated helper files, and
+  preference for small changes and limited customization.
+- The user authorized fixing, testing, and pushing these changes to the
+  personal fork. Prefer autonomous progress and concise updates.
+- Preserve unrelated configuration and checkout changes.
+- Upstream asks contributors to write their own PR descriptions and issue
+  comments, review the code themselves, and vouch for it. No upstream PR or
+  issue comment was posted by this agent.
+- Installing one of the reviewed candidates and pursuing an upstream
+  contribution are subsequent decisions. The running Emacs installation was
+  left on its earlier revision.
+- Investigating chat-label refresh is a separate possible follow-up.
